@@ -3,7 +3,7 @@
 # Blinker Fluid
 (WARNING: THIS IS EXPERIMENTAL AND IS PRONE TO CRASHING AND BREAKING)
 
-## Chromium Blink + V8 browser engine ported to iOS 15.4 with no WebKit.
+## Chromium Blink + V8 browser engine ported to iOS 15 with no WebKit.
 
 Blinker-fluid is an experimental browser for jailbroken iPhones that runs a real Chromium rendering engine on iOS without using Apple's WebKit engine.
 
@@ -13,22 +13,21 @@ I started this project mainly because my main browser on my PC is Ungoogled Chro
 ## What are the requirements for Blinker fluid and How do I install it?
  Tested & functional: An arm64e device on iOS 15.4 is recommended (This was only tested on an iPhone 13 pro running iOS 15.4 jailbroken)
  
- Untested: This should work on any arm64e device running any iOS 15 version, but I haven't tested it on any other device and other iOS 15 version. (Make an issue ticket if your iOS version is not iOS 15.4 and it doesn't work/crashes. This works on iOS 16 and 26.1 when using livecontainer too apparently :D)
+ Untested: This should work on any arm64e device running any iOS 15 version, but I haven't tested it on any other device and other iOS 15 version. (Make an issue ticket if another iOS version works taht isn't already stated here)
 
 # Features (Current)
 
 - Loads most modern websites that the iOS 15 webkit doesn't support (Some sites are still broken)
 - Real Blink rendering engine
 - Real V8 JavaScript engine
-- Video playback (Fullscreen broken)
+- Video playback
 - Search / URL bar
-- Tabs (Does not save after app restart!)
+- Tab manager (CURRENTLY BROKEN)
 - Bookmarks 
-- Downloads (Broken)
 - Dark mode support (Buggy and works on only certain sites) 
 - Custom start page 
-- Different search engines (Google and DuckDuckGo were the only ones I tested)
-- Desktop and mobile site (Untested)
+- Different search engines
+- Desktop and mobile site (Working on a fix)
 - Optional SOCKS5 / Tor proxy support (Untested, most likely broken)
 
 # Trollstore method:
@@ -57,10 +56,8 @@ I tried getting it to run with JIT enabled through Trollstore, but it kept crash
 | <img width="500" height="1000" alt="8252CD69-29BF-42EA-8C7E-41ACCB40BC5D" src="https://github.com/user-attachments/assets/20717283-7353-4880-beaa-413aea0ad65b" />| <img width="500" height="1000" alt="1B3CE020-188F-4FF4-9F52-D6A526BF6E12" src="https://github.com/user-attachments/assets/b03ae5e3-6fd0-475a-8508-63712f4be516" />| <img width="500" height="1000" alt="60853588-4371-4231-B516-78F635F9C1FA" src="https://github.com/user-attachments/assets/da35d2e6-2507-4bf9-af3a-1ed14321ab7d" />
 
 # What is being worked on or will be added in the future:
-- Better iOS version compatibility (iOS 16 confirmed to work and 26.1 through live container is also confirmed to work already. Working on an iOS 14 backport!)
-- Video playback full screen support
+- Better iOS version compatibility (iOS 15, 16, and 26.1 with livecontainer currently work, iOS 14 should work, but I haven't tested it)
 - Adding JIT support (Main priority at the moment, will probably fix many issues alone)
-- ChatGPT website crashing the app (Already working on it)
 - Built-in ad blocker (Planned for later on, too complex for me at the moment)
 - Crashing caused by tapping on links too fast. (Another main priority)
 
@@ -73,10 +70,10 @@ I tried getting it to run with JIT enabled through Trollstore, but it kept crash
 
 # Known issues:
 - Downloads being broken.
-- Tabs not saving after restart. (Already working on a fix)
-- App crashing randomly. (Most likely because of it being jitless)
-- ChatGPT website crashes app almost instantly. (Already working on a fix too, please make a ticket if you find any sites that crash when opened in the issues page! :D)
+- Tab Manager being broken.
+- App crashing randomly. (Cause is most likely because of it being jitless)
 - App crashes if you click on links or change sites too quickly without letting the first site load properly.
+- discord.com crashing instantly
 - Dark mode only working on some websites.
 - Some weird audio issues.
 - A lot more issues.
@@ -89,12 +86,13 @@ Apple requires every iOS browser to use WebKit and all browsers on the appstore 
 ### AI was specifically used as assistant as it should in:
 - A decent amount of the UI. (specifically main menu UI, UI will be completely redone by me when I'm done fixing the main issues)
 - Research about how Blink/V8 could be ported onto iOS.
+- Some parts of development.
 - Some small quick bug fixes.
 
 ## source code?
-no
+Yep :D
 
 # Credits:
-- Reynard Browser by Minh Ton heavily inspired the making of this
+- Reynard Browser by Minh Ton heavily inspired the creation of Blinker Fluid
 - Chromium open-source project
-- @miku_draws_random_stuff on Instagram for the app icons! (Great friend, great artist)
+- @miku_draws_random_stuff on Instagram for the Blinker Fluid app icons! (Great friend, great artist)
