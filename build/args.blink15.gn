@@ -1,0 +1,38 @@
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+use_blink = true
+is_debug = false
+is_component_build = false
+ios_enable_code_signing = false
+symbol_level = 0
+# Build min iOS 14.0. Below 14.5 the SDK's $ld$previous redirect routes the
+# AVAudioSession symbols to AVFoundation (present on every iOS) instead of the
+# standalone AVFAudio.framework (14.5+ only), so the app launches and audio
+# works on iOS 14. A lower target also weakens other post-14.0 system
+# frameworks, avoiding missing-symbol crashes.
+ios_deployment_target = "14.0"
+treat_warnings_as_errors = false
+
+# V8 normally reserves a ~1TB virtual sandbox cage at Isolate init, which iOS
+# cannot grant. Disabling the sandbox drops the reservation to the 4GB
+# pointer-compression cage.
+v8_enable_sandbox = false
+
+# Also disable pointer compression so V8 reserves no large virtual cage at all
+# (full 64-bit pointers), removing the remaining 4GB cage this constrained
+# process may also fail to reserve. Costs more memory per object.
+v8_enable_pointer_compression = false
+
+# cppgc (Oilpan, Blink's GC) reserves its own caged heap, trying to reserve
+# 2 x 4GB at renderer init and aborting when it can't. Disable the cage so
+# Oilpan uses normal page allocation.
+cppgc_enable_caged_heap = false
+# Enable proprietary codecs (H.264/AAC) so mainstream video/audio can decode.
+# On iOS this routes H.264 to the VideoToolbox hardware decoder.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# DCHECKs abort on debug-only invariant checks (scroll input handler,
+# single-process context checks) during normal use. Off for a release build.
+dcheck_always_on = false

@@ -1,0 +1,10 @@
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+is_debug = false
+is_component_build = false
+ios_enable_code_signing = false
+symbol_level = 0
+mac_sdk_min = "14.5"
+ios_deployment_target = "17.4"
+use_blink = true
