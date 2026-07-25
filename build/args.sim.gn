@@ -1,9 +1,0 @@
-target_os = "ios"
-target_cpu = "x64"
-target_environment = "simulator"
-use_blink = true
-is_debug = false
-is_component_build = false
-ios_enable_code_signing = false
-symbol_level = 0
-ios_deployment_target = "18.0"
