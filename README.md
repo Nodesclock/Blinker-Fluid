@@ -23,10 +23,12 @@ I started this project mainly because Ungoogled Chromium is my primary PC browse
 - Video playback
 - Search / URL bar
 - Tab manager 
-- Bookmarks 
+- Bookmarks
+- Browsing history
 - Dark mode support  
 - Different search engines
-- Desktop and mobile site 
+- Desktop and mobile site
+- App lock using Face ID/Passcode
 - Optional SOCKS5 / Tor proxy support
 
 # Trollstore method:
