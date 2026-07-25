@@ -5,94 +5,77 @@
 
 ## Chromium Blink + V8 browser engine ported to iOS 15 with no WebKit.
 
-Blinker-fluid is an experimental browser for jailbroken iPhones that runs a real Chromium rendering engine on iOS without using Apple's WebKit engine.
+Blinker Fluid is an experimental browser for jailbroken iPhones that runs a real Chromium rendering engine on iOS without using Apple's WebKit engine.
 
 ## Why did I start this project?
-I started this project mainly because my main browser on my PC is Ungoogled Chromium so why not try porting it onto iOS? Also, the fact most sites I use require updated webkits annoyed me. (This is my first major project I'm building in a long time)
+I started this project mainly because Ungoogled Chromium is my primary PC browser aside from Tor, so I thought, why not try porting it to iOS? I was also annoyed that many sites require a newer version of WebKit than the one included with iOS 15.
 
-## What are the requirements for Blinker fluid and How do I install it?
- Tested & functional: An arm64e device on iOS 15.4 is recommended (This was only tested on an iPhone 13 pro running iOS 15.4 jailbroken)
+## What are the iOS and device requirements for Blinker Fluid and how do I install it?
+ Tested and functional: An arm64e device running iOS 15.4 is recommended. This has only been tested on a jailbroken iPhone 13 Pro running iOS 15.4.
  
- Untested: This should work on any arm64e device running any iOS 15 version, but I haven't tested it on any other device and other iOS 15 version. (Make an issue ticket if another iOS version works taht isn't already stated here)
+ Untested: This should work on any arm64e device running iOS 15 and newer. (Make an issue ticket if another iOS version works that isn't already stated here)
 
 # Features (Current)
 
-- Loads most modern websites that the iOS 15 webkit doesn't support (Some sites are still broken)
+- Loads modern websites that the version of WebKit included with iOS 15 does not support
 - Real Blink rendering engine
 - Real V8 JavaScript engine
 - Video playback
 - Search / URL bar
-- Tab manager (CURRENTLY BROKEN)
+- Tab manager 
 - Bookmarks 
-- Dark mode support (Buggy and works on only certain sites) 
-- Custom start page 
+- Dark mode support  
 - Different search engines
-- Desktop and mobile site (Working on a fix)
-- Optional SOCKS5 / Tor proxy support (Untested, most likely broken)
+- Desktop and mobile site 
+- Optional SOCKS5 / Tor proxy support
 
 # Trollstore method:
 1. Download the IPA file from releases.
-2. Open the import the IPA file to Trollstore.
-3. tap install and let it download.
-4. Go to your homescreen and open the app.
-5. Blinker fluid opens, use it or not.
+2. Import the IPA file into TrollStore.
+3. Tap Install and wait for the installation to finish.
+4. Go to your home screen and open the app.
+5. Blinker Fluid opens.
 
 ### Any other IPA signing tool (Esign, Gbox, etc)
-- No idea if anything other than Trollstore works, but they hopefully should work too!
+- Blinker Fluid has not been tested with signing tools other than TrollStore, but they may work.
 
-### DISCLAIMER: THIS IS JITLESS EVEN WITH TROLLSTORE!
-#### What to expect with Blinker Fluid being jitless?
-- Expect heavy performance issues.
-- Expect frequent crashing.
-- Expect a lot of lag.
+### DISCLAIMER: JIT is currently unstable and will have issues.
 
-#### Why is this jitless?
-I tried getting it to run with JIT enabled through Trollstore, but it kept crashing so I'll leave problem for future me. :/
-
-## Screenshots of Blinker Fluid Working (iOS 15.4 on an iPhone 13 pro):
+## Screenshots of Blinker Fluid Working (iOS 15.4 on an iPhone 13 Pro):
 
 | [Github](https://github.com) | [Pinterest](https://pinterest.com) | [Gemini](https://gemini.google.com) |
 |---|---|---|
 | <img width="500" height="1000" alt="8252CD69-29BF-42EA-8C7E-41ACCB40BC5D" src="https://github.com/user-attachments/assets/20717283-7353-4880-beaa-413aea0ad65b" />| <img width="500" height="1000" alt="1B3CE020-188F-4FF4-9F52-D6A526BF6E12" src="https://github.com/user-attachments/assets/b03ae5e3-6fd0-475a-8508-63712f4be516" />| <img width="500" height="1000" alt="60853588-4371-4231-B516-78F635F9C1FA" src="https://github.com/user-attachments/assets/da35d2e6-2507-4bf9-af3a-1ed14321ab7d" />
 
 # What is being worked on or will be added in the future:
-- Better iOS version compatibility (iOS 15, 16, and 26.1 with livecontainer currently work, iOS 14 should work, but I haven't tested it)
-- Adding JIT support (Main priority at the moment, will probably fix many issues alone)
-- Built-in ad blocker (Planned for later on, too complex for me at the moment)
-- Crashing caused by tapping on links too fast. (Another main priority)
+- ~~Better iOS version compatibility (iOS 15, 16, and 26.1 with LiveContainer currently work, iOS 14 should work, but I haven't tested it)~~ (After v.0.2.1, only iOS 15 and newer will be supported due to iOS 14 and under testing complications)
+- ~~Adding JIT support (Main priority at the moment, will probably fix many issues alone)~~ - JIT is now officially supported and will continue receiving updates, though as of v0.2.1, it is not as stable as JITless mode.
+- Built-in ad blocker (Planned for a later version)
+- Incognito mode (I am working on a possible solution, though will be a feature later on.)
+- Website compatibility (Always being worked on with each update)
 
 # What will most likely never be added:
-- Extension support/ad blocker (Very time consuming and complicated. Might add a built in ad blocker, but not my priority at the moment.)
-- Password Manager (Same reason, very time consuming and complicated. Will most likely never be added)
-- Reader mode & translation (I've already tried and I just can't... Also, who uses Reader mode anyways?)
-- Website History (Too complicated for me)
-- Incognito mode (Yeah... it's pretty much impossible to my knowledge...)
+- Extension support (Very time consuming and complicated.)
+- Password manager (Same reason, very time consuming and complicated. Will most likely never be added.)
+- Reader mode & translation (Translation and built-in browser language option is in the works, though reader mode will continue to be a feature that will never be added)
+- ~~Website History (Too complicated for me)~~ Website history has been added to v.0.2.1
 
 # Known issues:
-- Downloads being broken.
-- Tab Manager being broken.
-- App crashing randomly. (Cause is most likely because of it being jitless)
-- App crashes if you click on links or change sites too quickly without letting the first site load properly.
-- discord.com crashing instantly
-- Dark mode only working on some websites.
-- Some weird audio issues.
-- A lot more issues.
-
-# How does Blink/V8 run on iOS?
-
-Apple requires every iOS browser to use WebKit and all browsers on the appstore are basically just reskins of Safari... The only alternative, BEK (BrowserEngineKit), requires iOS 17.4+ and an Apple entitlement and below that, there is genuinely no supported path at all. Getting Blink to even show a web page on iOS 15.4 was pretty annoying so here are the steps and problems I ran into while trying to port this on iOS. To port it, I had to solve a couple problems like how V8's JIT causes the app to just die at launch, so it runs jitless under basic fakesigning. Chromium tries to reserve a lot more virtual memory than iOS's 4GB limit allows, so the sandbox, pointer compression, and caged heap were disabled and the allocator was basically tricked into using 256MB memory pools. The rendered page normally gets displayed through a BEK class that literally just doesn't exist on any iOS version before 17.4, causing a black screen, so the render layer is attached to a plain UIView. This really only works because everything runs in a single process (which is why incognito is basically impossible to add to my understanding). Also, a few iOS 17 only APIs had to be removed to stop the app from crashing instantly on iOS 15.. A custom boot log and crash handler had to be written and made it actually possible to be able to find and fix these annoying problems. (This took about a month or so to complete)
+- v0.2.1 JIT version randomly crashes occasionally.
+- Some sites crash instantly. (Please create an issue explaining what website and what action caused the crash)
+- Weird audio issues.
+- Fullscreen video playback may cause a black screen.
 
 ## DISCLAIMER: AI WAS USED IN THE PROCESS OF BUILDING THIS!!
 ### AI was specifically used as assistant as it should in:
-- A decent amount of the UI. (specifically main menu UI, UI will be completely redone by me when I'm done fixing the main issues)
 - Research about how Blink/V8 could be ported onto iOS.
 - Some parts of development.
 - Some small quick bug fixes.
 
-## source code?
-Yep :D
+## Source code?
+Yes, it is all available.
 
 # Credits:
-- Reynard Browser by Minh Ton heavily inspired the creation of Blinker Fluid
-- Chromium open-source project
-- @miku_draws_random_stuff on Instagram for the Blinker Fluid app icons! (Great friend, great artist)
+- [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) heavily inspired the creation of Blinker Fluid
+- [Chromium open-source project](https://github.com/chromium/chromium) and [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium)
+- [@miku_draws_random_stuff](https://www.instagram.com/miku_draws_random_stuff/) on Instagram for the Blinker Fluid app icons! (Great friend, great artist)
