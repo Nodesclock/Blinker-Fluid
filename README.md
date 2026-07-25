@@ -41,7 +41,8 @@ I started this project mainly because Ungoogled Chromium is my primary PC browse
 ### Any other IPA signing tool (Esign, Gbox, etc)
 - Blinker Fluid has not been tested with signing tools other than TrollStore, but they may work.
 
-### DISCLAIMER: JIT is currently unstable and will have issues.
+### JIT version?
+- JIT is currently not fully implemented and is unstable. JITless is recomended untill JIT version is stable. 
 
 ## Screenshots of Blinker Fluid Working (iOS 15.4 on an iPhone 13 Pro):
 
@@ -63,7 +64,7 @@ I started this project mainly because Ungoogled Chromium is my primary PC browse
 - ~~Website History (Too complicated for me)~~ Website history has been added to v.0.2.1
 
 # Known issues:
-- v0.2.1 JIT version randomly crashes occasionally.
+- v.0.2.1 JIT version randomly crashes occasionally.
 - Some sites crash instantly. (Please create an issue explaining what website and what action caused the crash)
 - Weird audio issues.
 - Fullscreen video playback may cause a black screen.
