@@ -1,0 +1,24 @@
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+use_blink = true
+is_debug = false
+is_component_build = false
+ios_enable_code_signing = false
+symbol_level = 0
+mac_sdk_min = "14.5"
+ios_deployment_target = "14.0"
+ios_content_shell_bundle_identifier = "com.nodesclock.blinkerfluid"
+treat_warnings_as_errors = false
+
+# Avoid V8's sandbox reservation while retaining pointer compression.
+v8_enable_sandbox = false
+v8_enable_pointer_compression = true
+v8_enable_drumbrake = true
+
+# Avoid cppgc's large caged-heap reservation.
+cppgc_enable_caged_heap = false
+
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+dcheck_always_on = false
