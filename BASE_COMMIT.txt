@@ -1,8 +1,0 @@
-Chromium base commit: 31dce68b925c2b8efc93df832a86a7c0d03e3fa2
-Version: 149.0.7821.0
-
-V8 base commit (for v8/ paths): 642bb71b116595bcc50979c0e2d66c06fe0959b5
-
-The files under src/ are drop-in replacements for the same paths in a Chromium
-checkout at the commit above (V8 is a separate checkout under src/v8 at its own
-commit). Sync a Chromium tree to that commit, overlay src/, then build.
