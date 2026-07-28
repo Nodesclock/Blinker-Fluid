@@ -1,84 +1,120 @@
-<img width="100" height="100" alt="New Project 20  0B9169A" src="https://github.com/user-attachments/assets/67a507ac-e528-4720-abd8-23930b242dc0" />
+<p align="center">
+  <img width="100" height="100" alt="New Project 20  0B9169A" src="https://github.com/user-attachments/assets/67a507ac-e528-4720-abd8-23930b242dc0" />
+</p>
 
-# Blinker Fluid
-(WARNING: THIS IS EXPERIMENTAL AND IS PRONE TO CRASHING AND BREAKING)
+<h1 align="center">Blinker Fluid</h1>
 
-## Chromium Blink + V8 browser engine ported to iOS 15 with no WebKit.
+<p align="center">
+  <strong>An experimental Chromium Blink + V8 browser for iOS.</strong><br>
+  Runs without Apple's WebKit engine.
+</p>
 
-Blinker Fluid is an experimental browser for jailbroken iPhones that runs a real Chromium rendering engine on iOS without using Apple's WebKit engine.
+<p align="center">
+  <img src="https://img.shields.io/badge/version-v0.3-blue">
+  <img src="https://img.shields.io/badge/iOS-14%2B-lightgrey">
+  <img src="https://img.shields.io/badge/Chromium-M149-blue">
+  <img src="https://img.shields.io/badge/status-Experimental-orange">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue">
+</p>
 
-## Why did I start this project?
-I started this project mainly because Ungoogled Chromium is my primary PC browser aside from Tor, so I thought, why not try porting it to iOS? I was also annoyed that many sites require a newer version of WebKit than the one included with iOS 15.
+<p align="center">
+  <strong>Experimental browser.</strong> Expect bugs and crashes.
+</p>
 
-## What are the iOS and device requirements for Blinker Fluid and how do I install it?
- Tested and functional: An arm64e device running iOS 15.4 is recommended. This has only been tested on a jailbroken iPhone 13 Pro running iOS 15.4.
- 
- Untested: This should work on any arm64e device running iOS 15 and newer. (Make an issue ticket if another iOS version works that isn't already stated here)
+## About:
 
-# Features (Current)
+Blinker Fluid is an experimental privacy-focused browser that ports Chromium's **Blink** rendering engine and **V8** JavaScript engine to iOS, allowing modern websites to run without relying on Apple's built-in outdated **WebKit** engine.
 
-- Loads modern websites that the version of WebKit included with iOS 15 does not support
-- Real Blink rendering engine
-- Real V8 JavaScript engine
-- Video playback
-- Search / URL bar
-- Tab manager 
+The project mainly targets jailbroken devices and TrollStore capable devices, bringing a Chromium browser to older jailbroken iOS versions.
+
+## Why?
+
+I started Blinker Fluid because **Ungoogled Chromium** is my primary desktop browser (Not counting Tor), and I wanted to see if Chromium's Blink engine could run on jailbroken iOS 15. Another reason was that many modern websites no longer work correctly with the outdated version of WebKit on older iOS which many jailbroken users are stuck on.
+
+## Requirements:
+
+### Recommended:
+
+- arm64e device
+- iOS 15.4
+- TrollStore or a jailbreak
+
+### Compatibility:
+
+-  Tested: iPhone 13 Pro running iOS 15.2, 15.4, 16.0.2, and some other iOS versions including 26.1 and 26.2 using [LiveContainer](https://github.com/LiveContainer/LiveContainer)
+-  Expected to work: iOS 14 and newer (additional testing is appreciated)
+
+If you successfully test Blinker Fluid on another iOS version or device, please open an issue so compatibility can be documented.
+
+## Features:
+
+- Chromium Blink rendering engine
+- V8 JavaScript engine
+- Modern website compatibility
+- Tab manager
 - Bookmarks
 - Browsing history
-- Dark mode support  
-- Different search engines
-- Desktop and mobile site
-- App lock using Face ID/Passcode
+- Multiple search engines
+- Desktop & mobile browsing
+- Video playback
+- Face ID / Passcode app lock
 - Optional SOCKS5 / Tor proxy support
+- Dark mode support
 
-# Trollstore method:
-1. Download the IPA file from releases.
-2. Import the IPA file into TrollStore.
-3. Tap Install and wait for the installation to finish.
-4. Go to your home screen and open the app.
-5. Blinker Fluid opens.
+## Installation:
 
-### Any other IPA signing tool (Esign, Gbox, etc)
-- Blinker Fluid has not been tested with signing tools other than TrollStore, but they may work.
+### TrollStore:
 
-### JIT version?
-- JIT is currently not fully implemented and is unstable. JITless is recomended untill JIT version is stable. 
+1. Download the latest IPA from [**Releases/Tags**](https://github.com/Nodesclock/Blinker-Fluid/tags).
+2. Import it into TrollStore.
+3. Tap **Install**.
+4. Launch Blinker Fluid.
 
-## Screenshots of Blinker Fluid Working (iOS 15.4 on an iPhone 13 Pro):
+### Other signing tools:
 
-| [Github](https://github.com) | [Pinterest](https://pinterest.com) | [Gemini](https://gemini.google.com) |
-|---|---|---|
-| <img width="500" height="1000" alt="8252CD69-29BF-42EA-8C7E-41ACCB40BC5D" src="https://github.com/user-attachments/assets/20717283-7353-4880-beaa-413aea0ad65b" />| <img width="500" height="1000" alt="1B3CE020-188F-4FF4-9F52-D6A526BF6E12" src="https://github.com/user-attachments/assets/b03ae5e3-6fd0-475a-8508-63712f4be516" />| <img width="500" height="1000" alt="60853588-4371-4231-B516-78F635F9C1FA" src="https://github.com/user-attachments/assets/da35d2e6-2507-4bf9-af3a-1ed14321ab7d" />
+Apps such as Esign or GBox may work, but they have not been officially tested.
+
+## JIT compilation?
+
+Blinker Fluid is available in both **JITless** and **JIT** builds.
+
+The JIT build is still under active development and is less stable than the JITless version. Most v.0.3.x releases will mainly focus on improving JIT and JITless performance and stability.
+
+## Screenshots:
+
+*Screenshots from an iPhone 13 Pro running iOS 15.4.*
+
+| ChatGPT | Reddit | Blinker Fluid | Gemini | GitHub |
+|---|---|---|---|---|
+| <img width="250" alt="6B50EA54-FB5C-4D68-9D53-729D1868A3AD" src="https://github.com/user-attachments/assets/4fcb4b9e-35bc-4ede-82d0-6a39943929ff" /> | <img width="250" alt="3BAB4D30-B6DA-416A-8A5C-1FE0880831F4" src="https://github.com/user-attachments/assets/49b20585-2736-419c-930c-07d7e30628ae" /> | <img width="250" alt="252089EF-EB18-4656-9C99-C924B69C050C" src="https://github.com/user-attachments/assets/c015af7f-712d-40da-af6f-8c1f116ad841" /> | <img width="250" alt="384DA744-2E67-4589-BD25-A41D4E3A8AC5" src="https://github.com/user-attachments/assets/58090529-1e27-417c-a740-9aa77c63a6c2" /> | <img width="250" alt="20B6DE56-5C44-4404-9AF0-13DCEF723C3B" src="https://github.com/user-attachments/assets/2138d0d2-086c-4833-85f3-70634b96dec3" /> |
 
 # What is being worked on or will be added in the future:
-- ~~Better iOS version compatibility (iOS 15, 16, and 26.1 with LiveContainer currently work, iOS 14 should work, but I haven't tested it)~~ (After v.0.2.1, only iOS 15 and newer will be supported due to iOS 14 and under testing complications)
-- ~~Adding JIT support (Main priority at the moment, will probably fix many issues alone)~~ - JIT is now officially supported and will continue receiving updates, though as of v0.2.1, it is not as stable as JITless mode.
-- Built-in ad blocker (Planned for a later version)
-- Incognito mode (I am working on a possible solution, though will be a feature later on.)
-- Website compatibility (Always being worked on with each update)
 
-# What will most likely never be added:
-- Extension support (Very time consuming and complicated.)
-- Password manager (Same reason, very time consuming and complicated. Will most likely never be added.)
-- Reader mode & translation (Translation and built-in browser language option is in the works, though reader mode will continue to be a feature that will never be added)
-- ~~Website History (Too complicated for me)~~ Website history has been added to v.0.2.1
+- [x] Better iOS version compatibility (iOS 14 support has been restored as of v0.3, with ongoing compatibility improvements planned for future releases.)
+- [x] JIT support (Officially supported since v0.2.1 and will continue receiving stability and performance improvements.)
+- [x] Built-in ad blocker
+- [ ] Incognito mode (Currently researching a possible implementation. Planned for a future release.)
+- [ ] Website compatibility improvements (Continuously being improved with every release.)
 
-# Known issues:
-- v.0.2.1 JIT version randomly crashes occasionally.
-- Some sites crash instantly. (Please create an issue explaining what website and what action caused the crash)
-- Weird audio issues.
-- Fullscreen video playback may cause a black screen.
+# Features that will most likely never be added:
 
-## DISCLAIMER: AI WAS USED IN THE PROCESS OF BUILDING THIS!!
-### AI was specifically used as assistant as it should in:
-- Research about how Blink/V8 could be ported onto iOS.
-- Some parts of development.
-- Some small quick bug fixes.
+- [ ] Extension support (Implementing Chromium extension support on iOS is extremely complex and time-consuming, so it is not planned.)
+- [ ] Built-in password manager (Also very time consuming and complicated to implement. Use iCloud Keychain, [Aurora](https://github.com/Luki120/AuroraC), or other password managers.)
+- [ ] Reader mode 
+- [x] Browsing history (Added in v0.2.1. and newer.)
 
-## Source code?
-Yes, it is all available.
+## Disclaimer
+AI was used as a development assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
+
+- Research on porting Blink and V8 to iOS.
+- Assisting with parts of development.
+- Helping diagnose and fix some smaller bugs.
+
+## Source Code
+Yes! Blinker Fluid is fully open source, and all of the source code is available in this repository.
 
 # Credits:
-- [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) heavily inspired the creation of Blinker Fluid
-- [Chromium open-source project](https://github.com/chromium/chromium) and [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium)
-- [@miku_draws_random_stuff](https://www.instagram.com/miku_draws_random_stuff/) on Instagram for the Blinker Fluid app icons! (Great friend, great artist)
+- [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) for heavily inspiring the creation of Blinker Fluid.
+- [TrollStore](https://github.com/opa334/TrollStore) by [opa334](https://github.com/opa334) and all contributors.
+- [Chromium](https://github.com/chromium/chromium) and [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium).
+- [@miku_draws_random_stuff](https://www.instagram.com/miku_draws_random_stuff/) on Instagram for creating the Blinker Fluid app icons. (Great friend and an amazing artist!)
