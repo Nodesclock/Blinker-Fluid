@@ -103,14 +103,14 @@ The JIT build is still under active development and is less stable than the JITl
 - [ ] Reader mode 
 - [x] Browsing history (Added in v0.2.1. and newer.)
 
-## Disclaimer
+## Disclaimer:
 AI was used as a development assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
 
 - Research on porting Blink and V8 to iOS.
 - Assisting with parts of development.
 - Helping diagnose and fix some smaller bugs.
 
-## Source Code
+## Source Code?
 Yes! Blinker Fluid is fully open source, and all of the source code is available in this repository.
 
 # Credits:
