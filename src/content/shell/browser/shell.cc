@@ -836,9 +836,12 @@ void FlushAndDiagnoseAuthCookies(WebContents* wc) {
 
 // ChatGPT mobile-web authentication fallback.
 
+// Keep the Chrome version on the 149 series (see BASE_COMMIT.txt) so these
+// fallback UAs agree with the real engine; a mismatched version (previously
+// 124) is one of the inconsistency signals Google Sign-In / reCAPTCHA use.
 constexpr char kChatGPTDesktopUA[] =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+    "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 constexpr char kChatGPTIPhoneSafariUA[] =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 "
@@ -1798,6 +1801,7 @@ void Shell::DidFinishNavigation(NavigationHandle* navigation_handle) {
     UpdateKeyboardChatFallback(url);
     if (!navigation_handle->IsErrorPage()) {
       BlinkApplyPageZoom(web_contents(), url);
+      BlinkApplyUserAgent(web_contents(), url);
       BlinkInjectCosmeticFilters(web_contents(), url);
     }
   }

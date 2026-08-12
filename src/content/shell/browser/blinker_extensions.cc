@@ -17,6 +17,7 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/isolated_world_ids.h"
 #include "content/shell/browser/blinker_content_filter.h"
+#include "content/shell/browser/blinker_ua.h"
 #include "url/gurl.h"
 
 extern "C" void BlinkBootLog(const char* stage);
@@ -76,6 +77,21 @@ void BlinkApplyPageZoom(WebContents* contents, const GURL& url) {
     return;
   }
   BlinkSetPageZoom(contents, ReadHostZoom(url.host()));
+}
+
+void BlinkApplyUserAgent(WebContents* contents, const GURL& url) {
+  if (!contents || !url.SchemeIsHTTPOrHTTPS()) {
+    return;
+  }
+  const std::string ua = blinker_ua::EffectiveUAOverride();
+  if (ua.empty()) {
+    // No override configured; leave whatever UA the context was created with.
+    return;
+  }
+  blink::UserAgentOverride ua_override;
+  ua_override.ua_string_override = ua;
+  ua_override.ua_metadata_override = blinker_ua::EffectiveMetadataOverride();
+  contents->SetUserAgentOverride(ua_override, /*override_in_new_tabs=*/true);
 }
 
 void BlinkInjectCosmeticFilters(WebContents* contents, const GURL& url) {

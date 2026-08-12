@@ -197,6 +197,8 @@ static_library("content_shell_lib") {
     "browser/blinker_content_filter.h",
     "browser/blinker_extensions.cc",
     "browser/blinker_extensions.h",
+    "browser/blinker_ua.cc",
+    "browser/blinker_ua.h",
     "browser/shell_content_browser_client.cc",
     "browser/shell_content_browser_client.h",
     "browser/shell_content_index_provider.cc",

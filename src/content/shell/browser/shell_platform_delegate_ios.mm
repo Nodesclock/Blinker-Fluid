@@ -49,6 +49,7 @@ extern "C" int BlinkIOSSystemPermissionStatus(int permission) {
 #include "ui/native_theme/native_theme.h"
 #include "content/shell/app/resource.h"
 #include "content/shell/browser/blinker_extensions.h"
+#include "content/shell/browser/blinker_ua.h"
 #include "content/shell/browser/color_chooser/shell_color_chooser_ios.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_browser_main_parts.h"
@@ -2664,23 +2665,23 @@ static NSString* BlinkL(NSString* english) {
   static NSDictionary<NSString*, NSArray<NSString*>*>* tables;
   static dispatch_once_t once;
   dispatch_once(&once, ^{
-    keys = [@"Menu|Reload|New Tab|Tabs|Home|Bookmarks|Downloads|Request Mobile Page|Request Desktop Page|Page Zoom|Share Link|Settings|Check for Updates|Latest GitHub release|BROWSER|LIBRARY|APP|Search Engine|Appearance|Toolbar Position|Languages|Ad & Tracker Blocking|Tor / Proxy|Password / Face ID Lock|HTTPS-First Navigation|Website Permissions|Clear Browsing Data|History|JavaScript Engine|About Blinker Fluid|GENERAL|PRIVACY|PERFORMANCE|ABOUT|System|Light|Dark|Bottom|Top|On|Off"
+    keys = [@"Menu|Reload|New Tab|Tabs|Home|Bookmarks|Downloads|Request Mobile Page|Request Desktop Page|Page Zoom|User-Agent|Share Link|Settings|Check for Updates|Latest GitHub release|BROWSER|LIBRARY|APP|Search Engine|Appearance|Toolbar Position|Languages|Ad & Tracker Blocking|Tor / Proxy|Password / Face ID Lock|HTTPS-First Navigation|Website Permissions|Clear Browsing Data|History|JavaScript Engine|About Blinker Fluid|GENERAL|PRIVACY|PERFORMANCE|ABOUT|System|Light|Dark|Bottom|Top|On|Off"
         componentsSeparatedByString:@"|"];
     NSDictionary<NSString*, NSString*>* joined = @{
-      @"es": @"Menú|Recargar|Nueva pestaña|Pestañas|Inicio|Marcadores|Descargas|Solicitar sitio móvil|Solicitar sitio de escritorio|Zoom de página|Compartir enlace|Ajustes|Buscar actualizaciones|Última versión de GitHub|NAVEGADOR|BIBLIOTECA|APP|Motor de búsqueda|Apariencia|Posición de la barra|Idiomas|Bloqueo de anuncios y rastreadores|Tor / Proxy|Bloqueo con contraseña / Face ID|Navegación HTTPS primero|Permisos de sitios web|Borrar datos de navegación|Historial|Motor JavaScript|Acerca de Blinker Fluid|GENERAL|PRIVACIDAD|RENDIMIENTO|ACERCA DE|Sistema|Claro|Oscuro|Abajo|Arriba|Activado|Desactivado",
-      @"zh": @"菜单|重新加载|新建标签页|标签页|主页|书签|下载|请求移动版网页|请求桌面版网页|页面缩放|分享链接|设置|检查更新|最新 GitHub 版本|浏览器|资料库|应用|搜索引擎|外观|工具栏位置|语言|广告与跟踪器拦截|Tor / 代理|密码 / Face ID 锁定|HTTPS 优先导航|网站权限|清除浏览数据|历史记录|JavaScript 引擎|关于 Blinker Fluid|通用|隐私|性能|关于|系统|浅色|深色|底部|顶部|开启|关闭",
-      @"ru": @"Меню|Обновить|Новая вкладка|Вкладки|Главная|Закладки|Загрузки|Запросить мобильную версию|Запросить версию для ПК|Масштаб страницы|Поделиться ссылкой|Настройки|Проверить обновления|Последний выпуск GitHub|БРАУЗЕР|БИБЛИОТЕКА|ПРИЛОЖЕНИЕ|Поисковая система|Оформление|Положение панели|Языки|Блокировка рекламы и трекеров|Tor / Прокси|Блокировка паролем / Face ID|Сначала HTTPS|Разрешения сайтов|Очистить данные браузера|История|Движок JavaScript|О Blinker Fluid|ОБЩИЕ|КОНФИДЕНЦИАЛЬНОСТЬ|ПРОИЗВОДИТЕЛЬНОСТЬ|О ПРИЛОЖЕНИИ|Системная|Светлая|Тёмная|Снизу|Сверху|Вкл.|Выкл.",
-      @"uk": @"Меню|Оновити|Нова вкладка|Вкладки|Головна|Закладки|Завантаження|Запросити мобільну версію|Запросити версію для комп’ютера|Масштаб сторінки|Поділитися посиланням|Налаштування|Перевірити оновлення|Останній випуск GitHub|БРАУЗЕР|БІБЛІОТЕКА|ПРОГРАМА|Пошукова система|Вигляд|Положення панелі|Мови|Блокування реклами й трекерів|Tor / Проксі|Блокування паролем / Face ID|Спочатку HTTPS|Дозволи сайтів|Очистити дані перегляду|Історія|Рушій JavaScript|Про Blinker Fluid|ЗАГАЛЬНІ|КОНФІДЕНЦІЙНІСТЬ|ПРОДУКТИВНІСТЬ|ПРО ПРОГРАМУ|Системна|Світла|Темна|Знизу|Зверху|Увімк.|Вимк.",
-      @"pl": @"Menu|Odśwież|Nowa karta|Karty|Strona główna|Zakładki|Pobrane|Wersja mobilna|Wersja na komputer|Powiększenie strony|Udostępnij link|Ustawienia|Sprawdź aktualizacje|Najnowsze wydanie GitHub|PRZEGLĄDARKA|BIBLIOTEKA|APLIKACJA|Wyszukiwarka|Wygląd|Położenie paska|Języki|Blokowanie reklam i elementów śledzących|Tor / Proxy|Blokada hasłem / Face ID|Najpierw HTTPS|Uprawnienia witryn|Wyczyść dane przeglądania|Historia|Silnik JavaScript|O Blinker Fluid|OGÓLNE|PRYWATNOŚĆ|WYDAJNOŚĆ|INFORMACJE|Systemowy|Jasny|Ciemny|Dół|Góra|Wł.|Wył.",
-      @"cs": @"Nabídka|Načíst znovu|Nový panel|Panely|Domů|Záložky|Stažené soubory|Mobilní verze|Verze pro počítač|Přiblížení stránky|Sdílet odkaz|Nastavení|Zkontrolovat aktualizace|Nejnovější vydání GitHub|PROHLÍŽEČ|KNIHOVNA|APLIKACE|Vyhledávač|Vzhled|Poloha panelu|Jazyky|Blokování reklam a sledování|Tor / Proxy|Zámek heslem / Face ID|Nejprve HTTPS|Oprávnění webů|Vymazat údaje o prohlížení|Historie|JavaScriptový engine|O aplikaci Blinker Fluid|OBECNÉ|SOUKROMÍ|VÝKON|O APLIKACI|Systém|Světlý|Tmavý|Dole|Nahoře|Zapnuto|Vypnuto",
-      @"de": @"Menü|Neu laden|Neuer Tab|Tabs|Startseite|Lesezeichen|Downloads|Mobile Website anfordern|Desktop-Website anfordern|Seitenzoom|Link teilen|Einstellungen|Nach Updates suchen|Neueste GitHub-Version|BROWSER|BIBLIOTHEK|APP|Suchmaschine|Darstellung|Position der Symbolleiste|Sprachen|Werbe- und Trackerblocker|Tor / Proxy|Passwort- / Face-ID-Sperre|HTTPS zuerst|Website-Berechtigungen|Browserdaten löschen|Verlauf|JavaScript-Engine|Über Blinker Fluid|ALLGEMEIN|DATENSCHUTZ|LEISTUNG|ÜBER|System|Hell|Dunkel|Unten|Oben|Ein|Aus",
-      @"ja": @"メニュー|再読み込み|新しいタブ|タブ|ホーム|ブックマーク|ダウンロード|モバイル版を表示|デスクトップ版を表示|ページのズーム|リンクを共有|設定|アップデートを確認|最新の GitHub リリース|ブラウザ|ライブラリ|アプリ|検索エンジン|外観|ツールバーの位置|言語|広告・トラッカーブロック|Tor / プロキシ|パスワード / Face ID ロック|HTTPS 優先ナビゲーション|ウェブサイトの権限|閲覧データを消去|履歴|JavaScript エンジン|Blinker Fluid について|一般|プライバシー|パフォーマンス|情報|システム|ライト|ダーク|下|上|オン|オフ",
-      @"ko": @"메뉴|새로고침|새 탭|탭|홈|북마크|다운로드|모바일 페이지 요청|데스크톱 페이지 요청|페이지 확대/축소|링크 공유|설정|업데이트 확인|최신 GitHub 릴리스|브라우저|라이브러리|앱|검색 엔진|모양|도구 모음 위치|언어|광고 및 추적기 차단|Tor / 프록시|암호 / Face ID 잠금|HTTPS 우선 탐색|웹사이트 권한|인터넷 사용 기록 삭제|기록|JavaScript 엔진|Blinker Fluid 정보|일반|개인정보 보호|성능|정보|시스템|라이트|다크|아래|위|켜짐|꺼짐",
-      @"vi": @"Trình đơn|Tải lại|Thẻ mới|Các thẻ|Trang chủ|Dấu trang|Tải xuống|Yêu cầu trang di động|Yêu cầu trang máy tính|Thu phóng trang|Chia sẻ liên kết|Cài đặt|Kiểm tra cập nhật|Bản phát hành GitHub mới nhất|TRÌNH DUYỆT|THƯ VIỆN|ỨNG DỤNG|Công cụ tìm kiếm|Giao diện|Vị trí thanh công cụ|Ngôn ngữ|Chặn quảng cáo và trình theo dõi|Tor / Proxy|Khóa bằng mật khẩu / Face ID|Ưu tiên HTTPS|Quyền trang web|Xóa dữ liệu duyệt web|Lịch sử|Công cụ JavaScript|Giới thiệu Blinker Fluid|CHUNG|QUYỀN RIÊNG TƯ|HIỆU NĂNG|GIỚI THIỆU|Hệ thống|Sáng|Tối|Dưới|Trên|Bật|Tắt",
-      @"tr": @"Menü|Yeniden Yükle|Yeni Sekme|Sekmeler|Ana Sayfa|Yer İmleri|İndirilenler|Mobil Sayfa İste|Masaüstü Sayfa İste|Sayfa Yakınlaştırma|Bağlantıyı Paylaş|Ayarlar|Güncellemeleri Denetle|En Son GitHub Sürümü|TARAYICI|KİTAPLIK|UYGULAMA|Arama Motoru|Görünüm|Araç Çubuğu Konumu|Diller|Reklam ve İzleyici Engelleme|Tor / Proxy|Parola / Face ID Kilidi|Önce HTTPS|Web Sitesi İzinleri|Tarama Verilerini Temizle|Geçmiş|JavaScript Motoru|Blinker Fluid Hakkında|GENEL|GİZLİLİK|PERFORMANS|HAKKINDA|Sistem|Açık|Koyu|Alt|Üst|Açık|Kapalı",
-      @"fr": @"Menu|Actualiser|Nouvel onglet|Onglets|Accueil|Favoris|Téléchargements|Demander la version mobile|Demander la version pour ordinateur|Zoom de la page|Partager le lien|Réglages|Rechercher les mises à jour|Dernière version GitHub|NAVIGATEUR|BIBLIOTHÈQUE|APP|Moteur de recherche|Apparence|Position de la barre d’outils|Langues|Blocage des publicités et traqueurs|Tor / Proxy|Verrouillage par mot de passe / Face ID|Navigation HTTPS prioritaire|Autorisations des sites|Effacer les données de navigation|Historique|Moteur JavaScript|À propos de Blinker Fluid|GÉNÉRAL|CONFIDENTIALITÉ|PERFORMANCES|À PROPOS|Système|Clair|Sombre|En bas|En haut|Activé|Désactivé",
-      @"sv": @"Meny|Läs in igen|Ny flik|Flikar|Hem|Bokmärken|Hämtningar|Begär mobilwebbplats|Begär datorwebbplats|Sidzoom|Dela länk|Inställningar|Sök efter uppdateringar|Senaste GitHub-versionen|WEBBLÄSARE|BIBLIOTEK|APP|Sökmotor|Utseende|Verktygsfältets placering|Språk|Blockering av annonser och spårare|Tor / Proxy|Lås med lösenord / Face ID|HTTPS först|Webbplatsbehörigheter|Rensa webbinformation|Historik|JavaScript-motor|Om Blinker Fluid|ALLMÄNT|INTEGRITET|PRESTANDA|OM|System|Ljust|Mörkt|Nederkant|Överkant|På|Av",
-      @"ar": @"القائمة|إعادة التحميل|علامة تبويب جديدة|علامات التبويب|الرئيسية|الإشارات المرجعية|التنزيلات|طلب صفحة الهاتف|طلب صفحة سطح المكتب|تكبير الصفحة|مشاركة الرابط|الإعدادات|التحقق من التحديثات|أحدث إصدار على GitHub|المتصفح|المكتبة|التطبيق|محرك البحث|المظهر|موضع شريط الأدوات|اللغات|حظر الإعلانات وأدوات التتبع|Tor / الوكيل|قفل بكلمة مرور / Face ID|HTTPS أولاً|أذونات المواقع|مسح بيانات التصفح|السجل|محرك JavaScript|حول Blinker Fluid|عام|الخصوصية|الأداء|حول|النظام|فاتح|داكن|أسفل|أعلى|تشغيل|إيقاف",
+      @"es": @"Menú|Recargar|Nueva pestaña|Pestañas|Inicio|Marcadores|Descargas|Solicitar sitio móvil|Solicitar sitio de escritorio|Zoom de página|Agente de usuario|Compartir enlace|Ajustes|Buscar actualizaciones|Última versión de GitHub|NAVEGADOR|BIBLIOTECA|APP|Motor de búsqueda|Apariencia|Posición de la barra|Idiomas|Bloqueo de anuncios y rastreadores|Tor / Proxy|Bloqueo con contraseña / Face ID|Navegación HTTPS primero|Permisos de sitios web|Borrar datos de navegación|Historial|Motor JavaScript|Acerca de Blinker Fluid|GENERAL|PRIVACIDAD|RENDIMIENTO|ACERCA DE|Sistema|Claro|Oscuro|Abajo|Arriba|Activado|Desactivado",
+      @"zh": @"菜单|重新加载|新建标签页|标签页|主页|书签|下载|请求移动版网页|请求桌面版网页|页面缩放|用户代理|分享链接|设置|检查更新|最新 GitHub 版本|浏览器|资料库|应用|搜索引擎|外观|工具栏位置|语言|广告与跟踪器拦截|Tor / 代理|密码 / Face ID 锁定|HTTPS 优先导航|网站权限|清除浏览数据|历史记录|JavaScript 引擎|关于 Blinker Fluid|通用|隐私|性能|关于|系统|浅色|深色|底部|顶部|开启|关闭",
+      @"ru": @"Меню|Обновить|Новая вкладка|Вкладки|Главная|Закладки|Загрузки|Запросить мобильную версию|Запросить версию для ПК|Масштаб страницы|Пользовательский агент|Поделиться ссылкой|Настройки|Проверить обновления|Последний выпуск GitHub|БРАУЗЕР|БИБЛИОТЕКА|ПРИЛОЖЕНИЕ|Поисковая система|Оформление|Положение панели|Языки|Блокировка рекламы и трекеров|Tor / Прокси|Блокировка паролем / Face ID|Сначала HTTPS|Разрешения сайтов|Очистить данные браузера|История|Движок JavaScript|О Blinker Fluid|ОБЩИЕ|КОНФИДЕНЦИАЛЬНОСТЬ|ПРОИЗВОДИТЕЛЬНОСТЬ|О ПРИЛОЖЕНИИ|Системная|Светлая|Тёмная|Снизу|Сверху|Вкл.|Выкл.",
+      @"uk": @"Меню|Оновити|Нова вкладка|Вкладки|Головна|Закладки|Завантаження|Запросити мобільну версію|Запросити версію для комп’ютера|Масштаб сторінки|Користувацький агент|Поділитися посиланням|Налаштування|Перевірити оновлення|Останній випуск GitHub|БРАУЗЕР|БІБЛІОТЕКА|ПРОГРАМА|Пошукова система|Вигляд|Положення панелі|Мови|Блокування реклами й трекерів|Tor / Проксі|Блокування паролем / Face ID|Спочатку HTTPS|Дозволи сайтів|Очистити дані перегляду|Історія|Рушій JavaScript|Про Blinker Fluid|ЗАГАЛЬНІ|КОНФІДЕНЦІЙНІСТЬ|ПРОДУКТИВНІСТЬ|ПРО ПРОГРАМУ|Системна|Світла|Темна|Знизу|Зверху|Увімк.|Вимк.",
+      @"pl": @"Menu|Odśwież|Nowa karta|Karty|Strona główna|Zakładki|Pobrane|Wersja mobilna|Wersja na komputer|Powiększenie strony|Agent użytkownika|Udostępnij link|Ustawienia|Sprawdź aktualizacje|Najnowsze wydanie GitHub|PRZEGLĄDARKA|BIBLIOTEKA|APLIKACJA|Wyszukiwarka|Wygląd|Położenie paska|Języki|Blokowanie reklam i elementów śledzących|Tor / Proxy|Blokada hasłem / Face ID|Najpierw HTTPS|Uprawnienia witryn|Wyczyść dane przeglądania|Historia|Silnik JavaScript|O Blinker Fluid|OGÓLNE|PRYWATNOŚĆ|WYDAJNOŚĆ|INFORMACJE|Systemowy|Jasny|Ciemny|Dół|Góra|Wł.|Wył.",
+      @"cs": @"Nabídka|Načíst znovu|Nový panel|Panely|Domů|Záložky|Stažené soubory|Mobilní verze|Verze pro počítač|Přiblížení stránky|User agent|Sdílet odkaz|Nastavení|Zkontrolovat aktualizace|Nejnovější vydání GitHub|PROHLÍŽEČ|KNIHOVNA|APLIKACE|Vyhledávač|Vzhled|Poloha panelu|Jazyky|Blokování reklam a sledování|Tor / Proxy|Zámek heslem / Face ID|Nejprve HTTPS|Oprávnění webů|Vymazat údaje o prohlížení|Historie|JavaScriptový engine|O aplikaci Blinker Fluid|OBECNÉ|SOUKROMÍ|VÝKON|O APLIKACI|Systém|Světlý|Tmavý|Dole|Nahoře|Zapnuto|Vypnuto",
+      @"de": @"Menü|Neu laden|Neuer Tab|Tabs|Startseite|Lesezeichen|Downloads|Mobile Website anfordern|Desktop-Website anfordern|Seitenzoom|User-Agent|Link teilen|Einstellungen|Nach Updates suchen|Neueste GitHub-Version|BROWSER|BIBLIOTHEK|APP|Suchmaschine|Darstellung|Position der Symbolleiste|Sprachen|Werbe- und Trackerblocker|Tor / Proxy|Passwort- / Face-ID-Sperre|HTTPS zuerst|Website-Berechtigungen|Browserdaten löschen|Verlauf|JavaScript-Engine|Über Blinker Fluid|ALLGEMEIN|DATENSCHUTZ|LEISTUNG|ÜBER|System|Hell|Dunkel|Unten|Oben|Ein|Aus",
+      @"ja": @"メニュー|再読み込み|新しいタブ|タブ|ホーム|ブックマーク|ダウンロード|モバイル版を表示|デスクトップ版を表示|ページのズーム|ユーザーエージェント|リンクを共有|設定|アップデートを確認|最新の GitHub リリース|ブラウザ|ライブラリ|アプリ|検索エンジン|外観|ツールバーの位置|言語|広告・トラッカーブロック|Tor / プロキシ|パスワード / Face ID ロック|HTTPS 優先ナビゲーション|ウェブサイトの権限|閲覧データを消去|履歴|JavaScript エンジン|Blinker Fluid について|一般|プライバシー|パフォーマンス|情報|システム|ライト|ダーク|下|上|オン|オフ",
+      @"ko": @"메뉴|새로고침|새 탭|탭|홈|북마크|다운로드|모바일 페이지 요청|데스크톱 페이지 요청|페이지 확대/축소|사용자 에이전트|링크 공유|설정|업데이트 확인|최신 GitHub 릴리스|브라우저|라이브러리|앱|검색 엔진|모양|도구 모음 위치|언어|광고 및 추적기 차단|Tor / 프록시|암호 / Face ID 잠금|HTTPS 우선 탐색|웹사이트 권한|인터넷 사용 기록 삭제|기록|JavaScript 엔진|Blinker Fluid 정보|일반|개인정보 보호|성능|정보|시스템|라이트|다크|아래|위|켜짐|꺼짐",
+      @"vi": @"Trình đơn|Tải lại|Thẻ mới|Các thẻ|Trang chủ|Dấu trang|Tải xuống|Yêu cầu trang di động|Yêu cầu trang máy tính|Thu phóng trang|Tác nhân người dùng|Chia sẻ liên kết|Cài đặt|Kiểm tra cập nhật|Bản phát hành GitHub mới nhất|TRÌNH DUYỆT|THƯ VIỆN|ỨNG DỤNG|Công cụ tìm kiếm|Giao diện|Vị trí thanh công cụ|Ngôn ngữ|Chặn quảng cáo và trình theo dõi|Tor / Proxy|Khóa bằng mật khẩu / Face ID|Ưu tiên HTTPS|Quyền trang web|Xóa dữ liệu duyệt web|Lịch sử|Công cụ JavaScript|Giới thiệu Blinker Fluid|CHUNG|QUYỀN RIÊNG TƯ|HIỆU NĂNG|GIỚI THIỆU|Hệ thống|Sáng|Tối|Dưới|Trên|Bật|Tắt",
+      @"tr": @"Menü|Yeniden Yükle|Yeni Sekme|Sekmeler|Ana Sayfa|Yer İmleri|İndirilenler|Mobil Sayfa İste|Masaüstü Sayfa İste|Sayfa Yakınlaştırma|Kullanıcı Aracısı|Bağlantıyı Paylaş|Ayarlar|Güncellemeleri Denetle|En Son GitHub Sürümü|TARAYICI|KİTAPLIK|UYGULAMA|Arama Motoru|Görünüm|Araç Çubuğu Konumu|Diller|Reklam ve İzleyici Engelleme|Tor / Proxy|Parola / Face ID Kilidi|Önce HTTPS|Web Sitesi İzinleri|Tarama Verilerini Temizle|Geçmiş|JavaScript Motoru|Blinker Fluid Hakkında|GENEL|GİZLİLİK|PERFORMANS|HAKKINDA|Sistem|Açık|Koyu|Alt|Üst|Açık|Kapalı",
+      @"fr": @"Menu|Actualiser|Nouvel onglet|Onglets|Accueil|Favoris|Téléchargements|Demander la version mobile|Demander la version pour ordinateur|Zoom de la page|Agent utilisateur|Partager le lien|Réglages|Rechercher les mises à jour|Dernière version GitHub|NAVIGATEUR|BIBLIOTHÈQUE|APP|Moteur de recherche|Apparence|Position de la barre d’outils|Langues|Blocage des publicités et traqueurs|Tor / Proxy|Verrouillage par mot de passe / Face ID|Navigation HTTPS prioritaire|Autorisations des sites|Effacer les données de navigation|Historique|Moteur JavaScript|À propos de Blinker Fluid|GÉNÉRAL|CONFIDENTIALITÉ|PERFORMANCES|À PROPOS|Système|Clair|Sombre|En bas|En haut|Activé|Désactivé",
+      @"sv": @"Meny|Läs in igen|Ny flik|Flikar|Hem|Bokmärken|Hämtningar|Begär mobilwebbplats|Begär datorwebbplats|Sidzoom|Användaragent|Dela länk|Inställningar|Sök efter uppdateringar|Senaste GitHub-versionen|WEBBLÄSARE|BIBLIOTEK|APP|Sökmotor|Utseende|Verktygsfältets placering|Språk|Blockering av annonser och spårare|Tor / Proxy|Lås med lösenord / Face ID|HTTPS först|Webbplatsbehörigheter|Rensa webbinformation|Historik|JavaScript-motor|Om Blinker Fluid|ALLMÄNT|INTEGRITET|PRESTANDA|OM|System|Ljust|Mörkt|Nederkant|Överkant|På|Av",
+      @"ar": @"القائمة|إعادة التحميل|علامة تبويب جديدة|علامات التبويب|الرئيسية|الإشارات المرجعية|التنزيلات|طلب صفحة الهاتف|طلب صفحة سطح المكتب|تكبير الصفحة|وكيل المستخدم|مشاركة الرابط|الإعدادات|التحقق من التحديثات|أحدث إصدار على GitHub|المتصفح|المكتبة|التطبيق|محرك البحث|المظهر|موضع شريط الأدوات|اللغات|حظر الإعلانات وأدوات التتبع|Tor / الوكيل|قفل بكلمة مرور / Face ID|HTTPS أولاً|أذونات المواقع|مسح بيانات التصفح|السجل|محرك JavaScript|حول Blinker Fluid|عام|الخصوصية|الأداء|حول|النظام|فاتح|داكن|أسفل|أعلى|تشغيل|إيقاف",
     };
     NSMutableDictionary* built = [NSMutableDictionary dictionary];
     [joined enumerateKeysAndObjectsUsingBlock:
@@ -2733,6 +2734,8 @@ static NSString* BlinkL(NSString* english) {
   vc.compactRows = YES;
   vc.dismissOnSelect = NO;
   int zoomPercent = BlinkCurrentPageZoomPercent(_shell);
+  const char* uaPreset = content::blinker_ua::PresetName(
+      content::blinker_ua::GetPreset());
   vc.titles = [@[
     BlinkL(@"Reload"), BlinkL(@"New Tab"),
     [NSString stringWithFormat:@"%@ (%zu)", BlinkL(@"Tabs"),
@@ -2741,23 +2744,24 @@ static NSString* BlinkL(NSString* english) {
     isDesktop ? BlinkL(@"Request Mobile Page")
               : BlinkL(@"Request Desktop Page"),
     [NSString stringWithFormat:@"%@ (%d%%)", BlinkL(@"Page Zoom"), zoomPercent],
+    [NSString stringWithFormat:@"%@ (%s)", BlinkL(@"User-Agent"), uaPreset],
     BlinkL(@"Share Link"), BlinkL(@"Settings"),
     BlinkL(@"Restart Blinker Fluid"), BlinkL(@"Check for Updates")
   ] mutableCopy];
   vc.subtitles = [@[
-    @"", @"", @"", @"", @"", @"", @"", @"", @"", @"", @"",
+    @"", @"", @"", @"", @"", @"", @"", @"", @"", @"", @"", @"",
     BlinkL(@"Latest GitHub release")
   ] mutableCopy];
   vc.imageNames = @[
     @"arrow.clockwise", @"plus", @"square.on.square", @"house",
     @"bookmark", @"arrow.down.circle", @"desktopcomputer",
-    @"textformat.size", @"square.and.arrow.up",
+    @"textformat.size", @"globe", @"square.and.arrow.up",
     @"gearshape", @"arrow.clockwise.circle",
     @"arrow.triangle.2.circlepath"
   ];
   vc.sectionTitles =
       @[ BlinkL(@"BROWSER"), BlinkL(@"LIBRARY"), BlinkL(@"APP") ];
-  vc.sectionStarts = @[ @0, @4, @9 ];
+  vc.sectionStarts = @[ @0, @4, @10 ];
   if ([[NSUserDefaults standardUserDefaults]
           boolForKey:@"BlinkDownloadAttention"]) {
     vc.badgedRows = [NSIndexSet indexSetWithIndex:5];
@@ -2776,10 +2780,11 @@ static NSString* BlinkL(NSString* english) {
     else if (row == 5) [weakSelf showDownloads];
     else if (row == 6) dismissThen(^{ [weakSelf toggleDesktopSite]; });
     else if (row == 7) [weakSelf showPageZoomMenu:weakMenu];
-    else if (row == 8) dismissThen(^{ [weakSelf shareCurrentLink]; });
-    else if (row == 9) [weakSelf showSettings];
-    else if (row == 10) dismissThen(^{ [weakSelf restartApplication]; });
-    else if (row == 11) [weakSelf checkForUpdates];
+    else if (row == 8) [weakSelf showUserAgentMenu:weakMenu];
+    else if (row == 9) dismissThen(^{ [weakSelf shareCurrentLink]; });
+    else if (row == 10) [weakSelf showSettings];
+    else if (row == 11) dismissThen(^{ [weakSelf restartApplication]; });
+    else if (row == 12) [weakSelf checkForUpdates];
   };
   UINavigationController* nav =
       [[UINavigationController alloc] initWithRootViewController:vc];
@@ -2848,6 +2853,123 @@ static NSString* BlinkL(NSString* english) {
     [weakZoom.tableView reloadData];
   };
   [self presentList:vc];
+}
+
+- (void)showUserAgentMenu:(BlinkListVC*)menu {
+  if (!_shell || !_shell->web_contents()) {
+    return;
+  }
+  BlinkListVC* vc = [[BlinkListVC alloc] init];
+  vc.title = BlinkL(@"User-Agent");
+  vc.dismissOnSelect = NO;
+  vc.titles = [NSMutableArray array];
+  vc.subtitles = [NSMutableArray array];
+  const content::blinker_ua::Preset current = content::blinker_ua::GetPreset();
+  NSArray<NSString*>* presets = @[
+    BlinkL(@"Default"), @"iPhone", @"iPad", @"Mac", @"Windows", @"Android",
+    BlinkL(@"Custom")
+  ];
+  NSArray<NSString*>* descriptions = @[
+    BlinkL(@"Use the built-in User-Agent"),
+    BlinkL(@"Chrome for iPhone (CriOS)"),
+    BlinkL(@"Chrome for iPad"),
+    BlinkL(@"Chrome on macOS (desktop)"),
+    BlinkL(@"Chrome on Windows (desktop)"),
+    BlinkL(@"Chrome on Android (mobile)"),
+    BlinkL(@"Enter a custom User-Agent string")
+  ];
+  for (NSUInteger i = 0; i < presets.count; i++) {
+    [vc.titles addObject:presets[i]];
+    [vc.subtitles addObject:descriptions[i]];
+  }
+  vc.checkedRows = [NSIndexSet indexSetWithIndex:(NSUInteger)current];
+  __weak ContentShellWindowDelegate* weakSelf = self;
+  __weak BlinkListVC* weakMenu = menu;
+  __weak BlinkListVC* weakUA = vc;
+  vc.onSelect = ^(NSInteger row) {
+    ContentShellWindowDelegate* strongSelf = weakSelf;
+    if (!strongSelf || !strongSelf->_shell ||
+        !strongSelf->_shell->web_contents()) {
+      return;
+    }
+    if (row == static_cast<NSInteger>(content::blinker_ua::Preset::kCustom)) {
+      // Custom preset: prompt for the raw UA string.
+      UIAlertController* alert = [UIAlertController
+          alertControllerWithTitle:BlinkL(@"Custom User-Agent")
+                           message:BlinkL(@"Enter a full User-Agent string. "
+                                          @"Client hints (Sec-CH-UA) stay at "
+                                          @"the iPhone profile.")
+                    preferredStyle:UIAlertControllerStyleAlert];
+      [alert addTextFieldWithConfigurationHandler:^(UITextField* field) {
+        field.text = base::SysUTF8ToNSString(content::blinker_ua::GetCustomUA());
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.keyboardType = UIKeyboardTypeASCIICapable;
+        field.placeholder = @"Mozilla/5.0 ...";
+      }];
+      [alert addAction:[UIAlertAction actionWithTitle:BlinkL(@"Cancel")
+                                                style:UIAlertActionStyleCancel
+                                              handler:nil]];
+      [alert addAction:[UIAlertAction actionWithTitle:BlinkL(@"OK")
+                                                style:UIAlertActionStyleDefault
+                                              handler:^(UIAlertAction* action) {
+        ContentShellWindowDelegate* s = weakSelf;
+        if (!s || !s->_shell) {
+          return;
+        }
+        NSString* text = alert.textFields.firstObject.text;
+        content::blinker_ua::SetCustomUA(base::SysNSStringToUTF8(text ?: @""));
+        content::blinker_ua::SetPreset(content::blinker_ua::Preset::kCustom);
+        [s applyUserAgentOverride];
+        if (weakMenu) {
+          weakMenu.titles[8] = [NSString
+              stringWithFormat:@"%@ (%@)", BlinkL(@"User-Agent"),
+                               BlinkL(@"Custom")];
+          [weakMenu.tableView reloadData];
+        }
+        weakUA.checkedRows = [NSIndexSet
+            indexSetWithIndex:static_cast<NSInteger>(
+                                  content::blinker_ua::Preset::kCustom)];
+        [weakUA.tableView reloadData];
+      }]];
+      [strongSelf presentViewController:alert animated:YES completion:nil];
+      return;
+    }
+    content::blinker_ua::SetPreset(
+        static_cast<content::blinker_ua::Preset>(row));
+    [strongSelf applyUserAgentOverride];
+    if (weakMenu) {
+      weakMenu.titles[8] = [NSString
+          stringWithFormat:@"%@ (%s)", BlinkL(@"User-Agent"),
+                           content::blinker_ua::PresetName(
+                               static_cast<content::blinker_ua::Preset>(row))];
+      [weakMenu.tableView reloadData];
+    }
+    weakUA.checkedRows = [NSIndexSet indexSetWithIndex:row];
+    [weakUA.tableView reloadData];
+  };
+  [self presentList:vc];
+}
+
+// Applies the current UA override to the active WebContents immediately.
+// The setting persists in user defaults, so BlinkApplyUserAgent() also
+// re-applies it on every committed navigation.
+- (void)applyUserAgentOverride {
+  if (!_shell || !_shell->web_contents()) {
+    return;
+  }
+  content::WebContents* contents = _shell->web_contents();
+  const std::string ua = content::blinker_ua::EffectiveUAOverride();
+  blink::UserAgentOverride ua_override;
+  if (!ua.empty()) {
+    ua_override.ua_string_override = ua;
+    ua_override.ua_metadata_override =
+        content::blinker_ua::EffectiveMetadataOverride();
+    BlinkBootLog("UA_OVERRIDE: applied to active tab");
+  } else {
+    BlinkBootLog("UA_OVERRIDE: cleared (default UA)");
+  }
+  contents->SetUserAgentOverride(ua_override, /*override_in_new_tabs=*/true);
 }
 
 - (UIModalPresentationStyle)adaptivePresentationStyleForPresentationController:
@@ -3914,11 +4036,21 @@ static NSInteger BlinkCurrentJITTier(void) {
   bool isDesktop =
       [[NSUserDefaults standardUserDefaults] boolForKey:modeKey];
   const bool setDesktop = !isDesktop;
+  // A user-configured UA override (Settings > User-Agent) takes precedence:
+  // the desktop/mobile button then only switches the layout width, never the
+  // UA string, so the override survives the toggle.
+  const std::string override_ua = content::blinker_ua::EffectiveUAOverride();
+  // Keep the desktop UA's Chrome version on the 149 series (see BASE_COMMIT.txt)
+  // so it agrees with the real engine; a mismatched version (previously 124)
+  // is one of the inconsistency signals Google Sign-In / reCAPTCHA use.
   std::string ua =
       setDesktop ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 "
                    "Safari/537.36"
                  : std::string();
+  if (!override_ua.empty()) {
+    ua = override_ua;
+  }
   BlinkBootLog(setDesktop ? "SITE_MODE: set desktop" : "SITE_MODE: set mobile");
   char uaLog[384];
   snprintf(uaLog, sizeof(uaLog), "SITE_MODE: applying user agent=%s",
@@ -3926,7 +4058,11 @@ static NSInteger BlinkCurrentJITTier(void) {
   BlinkBootLog(uaLog);
   blink::UserAgentOverride uaOverride;
   uaOverride.ua_string_override = ua;
-  if (setDesktop) {
+  if (!override_ua.empty()) {
+    // Global override active: keep its client hints too.
+    uaOverride.ua_metadata_override =
+        content::blinker_ua::EffectiveMetadataOverride();
+  } else if (setDesktop) {
     // Sec-CH-UA-Mobile=?0 + macOS platform to match the desktop UA string.
     uaOverride.ua_metadata_override =
         content::GetShellUserAgentMetadataForSiteMode(/*desktop=*/true);
