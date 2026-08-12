@@ -48,8 +48,14 @@ shell_use_toolkit_views = toolkit_views && !is_castos
 
 declare_args() {
   content_shell_product_name = "Content Shell"
-  content_shell_version = "999.77.34.5"
-  content_shell_major_version = "999"
+  # Match the real Chromium milestone this tree is synced to (see BASE_COMMIT.txt:
+  # 149.0.7821.0). The upstream placeholder "999.77.34.5" leaked into the
+  # User-Agent (CriOS/999.77.34.5) and the Sec-CH-UA client hints
+  # (Google Chrome/999), a version that does not exist. Google Sign-In and
+  # reCAPTCHA reject browsers whose UA string, client hints and actual engine
+  # version are mutually inconsistent, which is why authentication fails.
+  content_shell_version = "149.0.7821.0"
+  content_shell_major_version = "149"
 }
 
 config("content_shell_lib_warnings") {

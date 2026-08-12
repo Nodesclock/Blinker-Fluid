@@ -3914,9 +3914,13 @@ static NSInteger BlinkCurrentJITTier(void) {
   bool isDesktop =
       [[NSUserDefaults standardUserDefaults] boolForKey:modeKey];
   const bool setDesktop = !isDesktop;
+  // Keep the desktop UA's Chrome version in sync with the real engine
+  // (content_shell_version in content/shell/BUILD.gn, currently 149.x). A
+  // mismatched version (previously 124) is one of the inconsistency signals
+  // Google Sign-In / reCAPTCHA use to reject the browser.
   std::string ua =
       setDesktop ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 "
                    "Safari/537.36"
                  : std::string();
   BlinkBootLog(setDesktop ? "SITE_MODE: set desktop" : "SITE_MODE: set mobile");
