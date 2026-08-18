@@ -90,8 +90,8 @@ The JIT build is still under active development and is less stable than the JITl
 
 # What is being worked on or will be added in the future:
 
-- [x] Better iOS version compatibility (iOS 14 support has been restored as of v0.3, with ongoing compatibility improvements planned for future releases.)
-- [x] JIT support (Officially supported since v0.2.1 and will continue receiving stability and performance improvements.)
+- [x] Better iOS version compatibility (iOS 14 support has been restored as of v.0.3, with ongoing compatibility improvements planned for future releases.)
+- [x] JIT support (Officially supported since v.0.2.1 and will continue receiving stability and performance improvements.)
 - [x] Built-in ad blocker
 - [ ] Incognito mode (Currently researching a possible implementation. Planned for a future release.)
 - [ ] Website compatibility improvements (Continuously being improved with every release.)
@@ -101,7 +101,7 @@ The JIT build is still under active development and is less stable than the JITl
 - [ ] Extension support (Implementing Chromium extension support on iOS is extremely complex and time-consuming, so it is not planned.)
 - [ ] Built-in password manager (Also very time consuming and complicated to implement. Use iCloud Keychain, [Aurora](https://github.com/Luki120/AuroraC), or other password managers.)
 - [ ] Reader mode 
-- [x] Browsing history (Added in v0.2.1. and newer.)
+- [x] Browsing history (Added in v.0.2.1. and newer.)
 
 ## Disclaimer:
 AI was used as a development assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
