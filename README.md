@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3-blue">
+  <img src="https://img.shields.io/badge/version-v.0.3-blue">
   <img src="https://img.shields.io/badge/iOS-14%2B-lightgrey">
   <img src="https://img.shields.io/badge/Chromium-M149-blue">
   <img src="https://img.shields.io/badge/status-Experimental-orange">
@@ -117,4 +117,4 @@ Yes! Blinker Fluid is fully open source, and all of the source code is available
 - [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) for heavily inspiring the creation of Blinker Fluid.
 - [TrollStore](https://github.com/opa334/TrollStore) by [opa334](https://github.com/opa334) and all contributors.
 - [Chromium](https://github.com/chromium/chromium) and [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium).
-- [@miku_draws_random_stuff](https://www.instagram.com/miku_draws_random_stuff/) on Instagram for creating the Blinker Fluid app icons. (Great friend and an amazing artist!)
+- [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) on Instagram for creating the Blinker Fluid app icons. (Great friend and an amazing artist!)
