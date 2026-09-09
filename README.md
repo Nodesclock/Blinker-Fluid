@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-v.0.3.1-blue">
-  <img src="https://img.shields.io/badge/iOS-12, 15%2B-lightgrey">
+  <img src="https://img.shields.io/badge/iOS-12 & 15%2B-lightgrey">
   <img src="https://img.shields.io/badge/Chromium-M149-blue">
   <img src="https://img.shields.io/badge/status-Experimental-orange">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue">
