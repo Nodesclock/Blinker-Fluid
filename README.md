@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v.0.3-blue">
-  <img src="https://img.shields.io/badge/iOS-14%2B-lightgrey">
+  <img src="https://img.shields.io/badge/version-v.0.3.1-blue">
+  <img src="https://img.shields.io/badge/iOS-12, 15%2B-lightgrey">
   <img src="https://img.shields.io/badge/Chromium-M149-blue">
   <img src="https://img.shields.io/badge/status-Experimental-orange">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue">
@@ -36,15 +36,25 @@ I started Blinker Fluid because **Ungoogled Chromium** is my primary desktop bro
 ### Recommended:
 
 - arm64e device
-- iOS 15.4
+- iOS 15.4/iOS 17.2.1/iOS 12.5.7 (All three versions have been tested by me)
 - TrollStore or a jailbreak
 
 ### Compatibility:
 
--  Tested: iPhone 13 Pro running iOS 15.2, 15.4, 16.0.2, and some other iOS versions including 26.1 and 26.2 using [LiveContainer](https://github.com/LiveContainer/LiveContainer)
--  Expected to work: iOS 14 and newer (additional testing is appreciated)
+Blinker Fluid should theoretically work on iOS 11 and 14, but has NOT been tested on those versions yet. Blinker Fluid should also be able to function on certain iOS version using LiveContainer with the ability to also use JIT version with StikDebug, I have NOT personally tested those versions or LiveContainer with Blinker Fluid, but you're free to try!
 
-If you successfully test Blinker Fluid on another iOS version or device, please open an issue so compatibility can be documented.
+| Device | iOS version | Status |
+| --- | --- | --- |
+| iPhone 13 Pro | iOS 15.4 | ✅ |
+| iPhone 14 Pro Max | iOS 17.2.1 | ✅ |
+| iPhone 6+ |  iOS 12.5.7 | ✅ |
+| iPad 7th Generation | iOS 17.5.1 | ✅ |
+| Unknown Device |  iOS 15.2 | ✅ |
+| Unknown Device | iOS 16.0.2 | ✅|
+| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer)| ✅ |
+| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer)| ✅ |
+
+If you successfully test Blinker Fluid on another iOS version or device, **please open an issue so compatibility can be documented**.
 
 ## Features:
 
@@ -58,6 +68,7 @@ If you successfully test Blinker Fluid on another iOS version or device, please 
 - Desktop & mobile browsing
 - Video playback
 - Face ID / Passcode app lock
+- Private Mode
 - Optional SOCKS5 / Tor proxy support
 - Dark mode support
 
@@ -78,7 +89,7 @@ Apps such as Esign or GBox may work, but they have not been officially tested.
 
 Blinker Fluid is available in both **JITless** and **JIT** builds.
 
-The JIT build is still under active development and is less stable than the JITless version. Most v.0.3.x releases will mainly focus on improving JIT and JITless performance and stability.
+JIT version is now more stable, though if encountering issues, consider trying out the JITless version. JITless versions may feel slower and can have issues loading certain sites.
 
 ## Screenshots:
 
@@ -90,25 +101,25 @@ The JIT build is still under active development and is less stable than the JITl
 
 # What is being worked on or will be added in the future:
 
-- [x] Better iOS version compatibility (iOS 14 support has been restored as of v.0.3, with ongoing compatibility improvements planned for future releases.)
+- [x] Better iOS version compatibility (iOS 12 support has been added as of Blinker Fluid v.0.3.1 and newer)
 - [x] JIT support (Officially supported since v.0.2.1 and will continue receiving stability and performance improvements.)
 - [x] Built-in ad blocker
-- [ ] Incognito mode (Currently researching a possible implementation. Planned for a future release.)
+- [x] Incognito mode (Currently researching a possible implementation. Planned for a future release.)
 - [ ] Website compatibility improvements (Continuously being improved with every release.)
 
 # Features that will most likely never be added:
 
-- [ ] Extension support (Implementing Chromium extension support on iOS is extremely complex and time-consuming, so it is not planned.)
+- [ ] Extension support (Implementing Chromium extension support on iOS is extremely complex and time-consuming, so it is not planned at the moment.)
 - [ ] Built-in password manager (Also very time consuming and complicated to implement. Use iCloud Keychain, [Aurora](https://github.com/Luki120/AuroraC), or other password managers.)
 - [ ] Reader mode 
 - [x] Browsing history (Added in v.0.2.1. and newer.)
 
-## Disclaimer:
-AI was used as a development assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
-
-- Research on porting Blink and V8 to iOS.
-- Assisting with parts of development.
-- Helping diagnose and fix some smaller bugs.
+> [!IMPORTANT]
+> AI was used as a development assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
+>
+> - Research on porting Blink and V8 to iOS.
+> - Assisting with parts of development.
+> - Helping diagnose and fix some smaller bugs.
 
 ## Source Code?
 Yes! Blinker Fluid is fully open source, and all of the source code is available in this repository.
