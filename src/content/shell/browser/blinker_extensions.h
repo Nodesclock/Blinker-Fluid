@@ -16,6 +16,12 @@ class WebContents;
 // every committed navigation.
 void BlinkApplyPageZoom(WebContents* contents, const GURL& url);
 
+// Applies the user-configured User-Agent override (see blinker_ua.h) to
+// `contents`. Called on every committed navigation, mirroring
+// BlinkApplyPageZoom, because a WebContents' UA override does not survive
+// navigations by itself.
+void BlinkApplyUserAgent(WebContents* contents, const GURL& url);
+
 // Applies `percent` to `contents` immediately, without reading the stored pref
 // (used when the user picks a zoom, to avoid a stale cfprefsd read-after-write).
 void BlinkSetPageZoom(WebContents* contents, int percent);

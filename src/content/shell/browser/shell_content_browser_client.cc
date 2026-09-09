@@ -7,6 +7,7 @@
 #include "build/build_config.h"
 #if BUILDFLAG(IS_IOS)
 #include "content/shell/browser/blinker_content_filter.h"
+#include "content/shell/browser/blinker_ua.h"
 #endif
 
 #include <stddef.h>
@@ -789,6 +790,15 @@ std::string ShellContentBrowserClient::GetUserAgent() {
   }
 
 #if BUILDFLAG(IS_IOS)
+  // User-configured override (Settings > User-Agent) wins over the built-in
+  // default. This keeps the context-level UA correct from the very first
+  // request; BlinkApplyUserAgent() re-applies it on every committed
+  // navigation.
+  const std::string override_ua = blinker_ua::EffectiveUAOverride();
+  if (!override_ua.empty()) {
+    return override_ua;
+  }
+
   // Identify the device as iPhone, not Android. The CriOS token is the
   // established Chrome-on-iOS form and prevents generic app-install banners
   // from sending users to Google Play. Request Desktop Site still supplies a
@@ -813,6 +823,11 @@ std::string ShellContentBrowserClient::GetUserAgent() {
 }
 
 blink::UserAgentMetadata ShellContentBrowserClient::GetUserAgentMetadata() {
+#if BUILDFLAG(IS_IOS)
+  if (auto override_metadata = blinker_ua::EffectiveMetadataOverride()) {
+    return *override_metadata;
+  }
+#endif
   return GetShellUserAgentMetadata();
 }
 
