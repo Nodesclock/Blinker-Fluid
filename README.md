@@ -53,14 +53,14 @@ Not every LiveContainer configuration has been personally tested, so results may
 
 | Device | iOS version | Status |
 | --- | --- | --- |
-| iPhone 13 Pro | iOS 15.4 | ✅ |
-| iPhone 14 Pro Max | iOS 17.2.1 | ✅ |
-| iPhone 6+ | iOS 12.5.7 | ✅ |
-| iPad 7th Generation | iOS 17.5.1 | ✅ |
-| Unknown Device | iOS 15.2 | ✅ |
-| Unknown Device | iOS 16.0.2 | ✅ |
-| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
-| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
+| iPhone 13 Pro | iOS 15.4 | â |
+| iPhone 14 Pro Max | iOS 17.2.1 | â |
+| iPhone 6+ | iOS 12.5.7 | â |
+| iPad 7th Generation | iOS 17.5.1 | â |
+| Unknown Device | iOS 15.2 | â |
+| Unknown Device | iOS 16.0.2 | â |
+| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | â |
+| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | â |
 
 If you successfully test Blinker Fluid on another iOS version or device, **please open an issue so compatibility can be documented**.
 
@@ -151,55 +151,78 @@ The Chromium source overlay and main build configuration are available directly 
 
 Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The repository does not contain the entire Chromium source tree; instead, the `src/` directory contains the files modified by Blinker Fluid and is intended to be applied over a normal Chromium checkout.
 
-## Building
+## Building v0.3.1
 
-> [!IMPORTANT]
-> These build instructions are provided for reference. A successful build or deployment target does not guarantee compatibility with every device, iOS version, jailbreak, TrollStore configuration, or sideloading environment.
+The repository contains a Chromium source overlay. The commands below cover the standard iOS 14+ app and its JIT variant. The full packaging recipe for the uploaded iOS 11/12 builds is not yet documented.
 
-Blinker Fluid is a source overlay on Chromium **M149** (`31dce68b`). It is applied to a normal iOS Chromium checkout and builds Chromium's `content_shell`.
+### Requirements
 
-### Check out Chromium
+- macOS with Xcode and its command-line tools selected.
+- Chromium's [depot_tools](https://chromium.googlesource.com/chromium/tools/depot_tools.git/+/HEAD/README.md) installed and available in `PATH`.
+- Git, Python 3, rsync, and enough free space for a full Chromium checkout and build.
 
-Create a Chromium checkout and sync to the revision used by Blinker Fluid:
+The uploaded standard v0.3.1 IPA records Xcode 16.2 and the iOS 18.2 SDK.
+
+### Get the source
+
+Run these commands in a directory where you want to keep both repositories:
 
 ```sh
+git clone https://github.com/Nodesclock/Blinker-Fluid.git
+BF_SRC="$(pwd)/Blinker-Fluid"
+
 mkdir chromium
 cd chromium
+gclient config --unmanaged https://chromium.googlesource.com/chromium/src.git
+cat >> .gclient <<'EOF'
+target_os = ["ios"]
+target_os_only = True
+EOF
 
-gclient config --unmanaged https://chromium.googlesource.com/chromium/src.git --custom-var=target_os=["ios"]
-
-gclient sync --nohooks -r 31dce68b925c2b8efc93df832a86a7c0d03e3fa2
-```
-
-### Apply the Blinker Fluid overlay
-
-`MODIFIED_FILES.txt` lists the files modified by Blinker Fluid.
-
-This includes files from separate Chromium checkouts such as `v8/` and `third_party/angle/`, so a root Chromium `git diff` alone will not necessarily show every modification.
-
-Set `$SRC` to the path of your cloned Blinker Fluid repository, then run:
-
-```sh
-rsync -a --files-from="$SRC/MODIFIED_FILES.txt" "$SRC/src/" src/
-
+gclient sync --nohooks -r src@31dce68b925c2b8efc93df832a86a7c0d03e3fa2
+rsync -a "$BF_SRC/src/" src/
 gclient runhooks
+cd src
 ```
 
-### Build
+The pinned Chromium revision also pins the V8 revision listed in `BASE_COMMIT.txt`. Apply the overlay after syncing; syncing again can overwrite changes in dependency checkouts.
 
-Create the output directory and copy the provided GN configuration:
+### Build the standard and JIT apps
+
+Set the app version to match v0.3.1:
 
 ```sh
-mkdir -p out/blink15
-
-cp "$SRC/build_args.gn" out/blink15/args.gn
-
-gn gen out/blink15
-
-autoninja -C out/blink15 content_shell
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.3.1' content/shell/app/ios/ios-app.plist
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0.3.1' content/shell/app/ios/ios-app.plist
 ```
 
-The main configuration currently uses an iOS **14.0+ deployment target**.
+Standard edition:
+
+```sh
+mkdir -p out/blink14
+cp "$BF_SRC/build_args.gn" out/blink14/args.gn
+gn gen out/blink14
+autoninja -C out/blink14 content_shell
+```
+
+JIT edition:
+
+```sh
+mkdir -p out/blink14-jit
+sed 's/com.nodesclock.blinkerfluid/com.nodesclock.blinkerfluid.jit/'   "$BF_SRC/build_args.gn" > out/blink14-jit/args.gn
+gn gen out/blink14-jit
+autoninja -C out/blink14-jit content_shell
+```
+
+The bundle identifier selects the JIT edition. Actual JIT availability also depends on the installation environment and runtime checks.
+
+### IPA packaging and legacy builds
+
+The commands above build app bundles with code signing disabled. The project also defines a `content_shell_ipa` packaging target. The release signing/entitlements and final packaging steps still need to be documented before this is a complete recipe for the uploaded IPA/TIPA files.
+
+The uploaded iOS 11/12 editions require their own build settings and resource packaging. The supplied `build_args.gn` targets iOS 14.0; lowering that value alone is not a verified legacy-build recipe.
+
+These instructions have not been validated with a clean rebuild. Older releases require their corresponding source and configuration; this section covers v0.3.1 only.
 
 ## Credits
 
