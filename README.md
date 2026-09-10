@@ -51,6 +51,7 @@ Blinker Fluid should theoretically work on iOS 11 and 14, but has NOT been teste
 | iPad 7th Generation | iOS 17.5.1 | ✅ |
 | Unknown Device |  iOS 15.2 | ✅ |
 | Unknown Device | iOS 16.0.2 | ✅|
+| iPhone 12 Pro Max | iOS 14.3 | ✅|
 | iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer)| ✅ |
 | Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer)| ✅ |
 
