@@ -165,9 +165,7 @@ Other build variants use the same steps with different GN args.
 
 | Variant | Args file | Minimum iOS |
 | --- | --- | --- |
-| Main | `build_args.gn` | 14.0 |
-| LiveContainer / sideload | `build_args.compat.gn` | 14.0 |
-| iOS 11 | `build_args.ios11.gn` | 11.0 |
+| Main/iOS 14+ | `build_args.gn` | 14.0 |
 | iOS 12 | `build_args.ios12.gn` | 12.0 |
 
 Package the finished build.
