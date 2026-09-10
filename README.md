@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="100" height="100" alt="New Project 20  0B9169A" src="https://github.com/user-attachments/assets/67a507ac-e528-4720-abd8-23930b242dc0" />
+  <img width="100" height="100" alt="Blinker Fluid" src="https://github.com/user-attachments/assets/67a507ac-e528-4720-abd8-23930b242dc0" />
 </p>
 
 <h1 align="center">Blinker Fluid</h1>
@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v.0.3.1-blue">
-  <img src="https://img.shields.io/badge/iOS-12 & 14%2B-lightgrey">
+  <img src="https://img.shields.io/badge/version-v0.3.1-blue">
+  <img src="https://img.shields.io/badge/iOS-12%20%26%2014%2B-lightgrey">
   <img src="https://img.shields.io/badge/Chromium-M149-blue">
   <img src="https://img.shields.io/badge/status-Experimental-orange">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue">
@@ -21,45 +21,50 @@
   <strong>Experimental browser.</strong> Expect bugs and crashes.
 </p>
 
-## About:
+## About
 
-Blinker Fluid is an experimental privacy-focused browser that ports Chromium's **Blink** rendering engine and **V8** JavaScript engine to iOS, allowing modern websites to run without relying on Apple's built-in outdated **WebKit** engine.
+Blinker Fluid is an experimental privacy-focused browser that ports Chromium's **Blink** rendering engine and **V8** JavaScript engine to iOS, allowing websites to run without relying on Apple's built-in **WebKit** engine.
 
-The project mainly targets jailbroken devices and TrollStore capable devices, bringing a Chromium browser to older jailbroken iOS versions.
+The project primarily targets jailbroken and TrollStore-capable devices, bringing a Chromium-based browser to older iOS versions where the bundled version of WebKit may struggle with some modern websites.
 
 ## Why?
 
-I started Blinker Fluid because **Ungoogled Chromium** is my primary desktop browser (Not counting Tor), and I wanted to see if Chromium's Blink engine could run on jailbroken iOS 15. Another reason was that many modern websites no longer work correctly with the outdated version of WebKit on older iOS which many jailbroken users are stuck on.
+I started Blinker Fluid because **Ungoogled Chromium** is my primary desktop browser (not counting Tor), and I wanted to see if Chromium's Blink engine could run on jailbroken iOS.
 
-## Requirements:
+Another reason was that many modern websites no longer work correctly with older versions of WebKit bundled with older iOS releases, which many jailbroken users are unable or unwilling to update from.
 
-### Recommended:
+## Requirements
+
+### Recommended
 
 - arm64e device
-- iOS 15.4/iOS 17.2.1/iOS 12.5.7 (All three versions have been tested by me)
+- iOS 15.4, iOS 17.2.1, or iOS 12.5.7
 - TrollStore or a jailbreak
 
-### Compatibility:
+These configurations have been personally tested.
 
-Blinker Fluid should theoretically work on iOS 11 and 14, but has NOT been tested on those versions yet. Blinker Fluid should also be able to function on certain iOS version using LiveContainer with the ability to also use JIT version with StikDebug, I have NOT personally tested those versions or LiveContainer with Blinker Fluid, but you're free to try!
+### Compatibility
+
+Blinker Fluid should theoretically work on iOS 11 and iOS 14, but these versions have not yet been personally tested.
+
+Blinker Fluid may also work on other iOS versions through [LiveContainer](https://github.com/LiveContainer/LiveContainer). The JIT build may also be usable with tools such as StikDebug.
+
+Not every LiveContainer configuration has been personally tested, so results may vary.
 
 | Device | iOS version | Status |
 | --- | --- | --- |
 | iPhone 13 Pro | iOS 15.4 | ✅ |
 | iPhone 14 Pro Max | iOS 17.2.1 | ✅ |
-| iPhone 6+ |  iOS 12.5.7 | ✅ |
+| iPhone 6+ | iOS 12.5.7 | ✅ |
 | iPad 7th Generation | iOS 17.5.1 | ✅ |
-| Unknown Device |  iOS 15.2 | ✅ |
-| Unknown Device | iOS 16.0.2 | ✅|
-| iPhone 12 Pro Max | iOS 14.3 | ✅|
-| iPhone 5S | iOS 12.5.8 | ✅|
-| iPhone 15 Pro Max | iOS 26.6.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer)|✅|
-|iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer)| ✅ |
-| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer)| ✅ |
+| Unknown Device | iOS 15.2 | ✅ |
+| Unknown Device | iOS 16.0.2 | ✅ |
+| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
+| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 
 If you successfully test Blinker Fluid on another iOS version or device, **please open an issue so compatibility can be documented**.
 
-## Features:
+## Features
 
 - Chromium Blink rendering engine
 - V8 JavaScript engine
@@ -72,117 +77,158 @@ If you successfully test Blinker Fluid on another iOS version or device, **pleas
 - Video playback
 - Face ID / Passcode app lock
 - Private Mode
+- Built-in content/ad blocking
 - Optional SOCKS5 / Tor proxy support
 - Dark mode support
 
-## Installation:
+## Installation
 
-### TrollStore:
+### TrollStore
 
 1. Download the latest IPA from [**Releases/Tags**](https://github.com/Nodesclock/Blinker-Fluid/tags).
 2. Import it into TrollStore.
 3. Tap **Install**.
 4. Launch Blinker Fluid.
 
-### Other signing tools:
+### Other signing tools
 
-Apps such as Esign or GBox may work, but they have not been officially tested.
+Other signing methods such as ESign or GBox may work, but they have not been officially tested.
 
-## JIT compilation?
+## JIT Compilation
 
 Blinker Fluid is available in both **JITless** and **JIT** builds.
 
-JIT version is now more stable, though if encountering issues, consider trying out the JITless version. JITless versions may feel slower and can have issues loading certain sites.
+The JIT version is now more stable, though if you encounter issues, consider trying the JITless build.
 
-## Screenshots:
+JITless builds may feel slower and can have issues loading certain websites because V8 cannot use its normal JIT compilation path.
+
+## Screenshots
 
 *Screenshots from an iPhone 13 Pro running iOS 15.4.*
 
 | ChatGPT | Reddit | Blinker Fluid | Gemini | GitHub |
-|---|---|---|---|---|
-| <img width="250" alt="6B50EA54-FB5C-4D68-9D53-729D1868A3AD" src="https://github.com/user-attachments/assets/4fcb4b9e-35bc-4ede-82d0-6a39943929ff" /> | <img width="250" alt="3BAB4D30-B6DA-416A-8A5C-1FE0880831F4" src="https://github.com/user-attachments/assets/49b20585-2736-419c-930c-07d7e30628ae" /> | <img width="250" alt="252089EF-EB18-4656-9C99-C924B69C050C" src="https://github.com/user-attachments/assets/c015af7f-712d-40da-af6f-8c1f116ad841" /> | <img width="250" alt="384DA744-2E67-4589-BD25-A41D4E3A8AC5" src="https://github.com/user-attachments/assets/58090529-1e27-417c-a740-9aa77c63a6c2" /> | <img width="250" alt="20B6DE56-5C44-4404-9AF0-13DCEF723C3B" src="https://github.com/user-attachments/assets/2138d0d2-086c-4833-85f3-70634b96dec3" /> |
+| --- | --- | --- | --- | --- |
+| <img width="250" alt="ChatGPT" src="https://github.com/user-attachments/assets/4fcb4b9e-35bc-4ede-82d0-6a39943929ff" /> | <img width="250" alt="Reddit" src="https://github.com/user-attachments/assets/49b20585-2736-419c-930c-07d7e30628ae" /> | <img width="250" alt="Blinker Fluid" src="https://github.com/user-attachments/assets/c015af7f-712d-40da-af6f-8c1f116ad841" /> | <img width="250" alt="Gemini" src="https://github.com/user-attachments/assets/58090529-1e27-417c-a740-9aa77c63a6c2" /> | <img width="250" alt="GitHub" src="https://github.com/user-attachments/assets/2138d0d2-086c-4833-85f3-70634b96dec3" /> |
 
-# What is being worked on or will be added in the future:
+## What is being worked on or may be added in the future
 
-- [x] Better iOS version compatibility (iOS 12 support has been added as of Blinker Fluid v.0.3.1 and newer)
-- [x] JIT support (Officially supported since v.0.2.1 and will continue receiving stability and performance improvements.)
-- [x] Built-in ad blocker
-- [x] Incognito mode (Currently researching a possible implementation. Planned for a future release.)
-- [ ] Website compatibility improvements (Continuously being improved with every release.)
+- [x] Better iOS version compatibility  
+  iOS 12 support was added in Blinker Fluid v0.3.1.
 
-# Features that will most likely never be added:
+- [x] JIT support  
+  Officially supported since v0.2.1 and continuing to receive stability and performance improvements.
 
-- [ ] Extension support (Implementing Chromium extension support on iOS is extremely complex and time-consuming, so it is not planned at the moment.)
-- [ ] Built-in password manager (Also very time consuming and complicated to implement. Use iCloud Keychain, [Aurora](https://github.com/Luki120/AuroraC), or other password managers.)
-- [ ] Reader mode 
-- [x] Browsing history (Added in v.0.2.1. and newer.)
+- [x] Built-in ad/content blocker
+
+- [ ] Website compatibility improvements  
+  Continuously being improved with each release.
+
+- [ ] Further Private Mode / browsing privacy improvements
+
+## Features that will most likely never be added
+
+- [ ] Extension support  
+  Implementing full Chromium extension support on iOS would be extremely complex and time-consuming, so it is not currently planned.
+
+- [ ] Built-in password manager  
+  This would also require significant additional work. Use iCloud Keychain, [Aurora](https://github.com/Luki120/AuroraC), or another password manager instead.
+
+- [ ] Reader mode
 
 > [!IMPORTANT]
-> AI was used as a development assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
+> AI was used as an assistant during the creation of Blinker Fluid. It was used to assist with development in these areas:
 >
 > - Research on porting Blink and V8 to iOS.
-> - Assisting with parts of development.
-> - Helping diagnose and fix some smaller bugs.
+> - Assisting with some parts of development.
+> - Helping me diagnose and fix smaller bugs.
+> - Helping me with translating things to English. (Apologies if README sounds AI generated)
 
-## Source Code?
-Yes! Blinker Fluid is fully open source, and all of the source code is available in this repository.
+## Source Code
+
+Yes! Blinker Fluid is fully open source.
+
+The Chromium source overlay and main build configuration are available directly in this repository.
+
+Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The repository does not contain the entire Chromium source tree; instead, the `src/` directory contains the files modified by Blinker Fluid and is intended to be applied over a normal Chromium checkout.
 
 ## Building
 
 > [!IMPORTANT]
-> Build instructions are included below for reference. The deployment target does not guarantee compatibility with every device or iOS version.
+> These build instructions are provided for reference. A successful build or deployment target does not guarantee compatibility with every device, iOS version, jailbreak, TrollStore configuration, or sideloading environment.
 
-Blinker Fluid is a source overlay on Chromium **M149** (`31dce68b`). It is applied to a normal iOS Chromium checkout and builds `content_shell`.
+Blinker Fluid is a source overlay on Chromium **M149** (`31dce68b`). It is applied to a normal iOS Chromium checkout and builds Chromium's `content_shell`.
 
-To build the project, you'll need macOS, Xcode 16.2, [`depot_tools`], around 150 GB of free storage, and `ldid` for packaging. Clean builds can take a few hours.
+To build the project, you'll need:
 
-Check out Chromium at the pinned revision.
+- macOS
+- Xcode 16.2
+- [`depot_tools`]
+- Around 150 GB of free storage
+- `ldid` for release packaging/signing
+
+Clean Chromium builds can take several hours.
+
+### Check out Chromium
+
+Create a Chromium checkout and sync to the revision used by Blinker Fluid:
 
 ```sh
-mkdir chromium && cd chromium
+mkdir chromium
+cd chromium
+
 gclient config --unmanaged https://chromium.googlesource.com/chromium/src.git --custom-var=target_os=["ios"]
+
 gclient sync --nohooks -r 31dce68b925c2b8efc93df832a86a7c0d03e3fa2
 ```
 
-Apply the Blinker Fluid source overlay.
+### Apply the Blinker Fluid overlay
 
-`MODIFIED_FILES.txt` lists every changed file, including files from the separate `v8/` and `third_party/angle/` checkouts. A root `git diff` will not show changes inside those checkouts.
+`MODIFIED_FILES.txt` lists the files modified by Blinker Fluid.
+
+This includes files from separate Chromium checkouts such as `v8/` and `third_party/angle/`, so a root Chromium `git diff` alone will not necessarily show every modification.
+
+Set `$SRC` to the path of your cloned Blinker Fluid repository, then run:
 
 ```sh
 rsync -a --files-from="$SRC/MODIFIED_FILES.txt" "$SRC/src/" src/
+
 gclient runhooks
 ```
 
-Build the main iOS 15+ variant.
+### Build
+
+Create the output directory and copy the provided GN configuration:
 
 ```sh
+mkdir -p out/blink15
+
 cp "$SRC/build_args.gn" out/blink15/args.gn
+
 gn gen out/blink15
+
 autoninja -C out/blink15 content_shell
 ```
 
-Other build variants use the same steps with different GN args.
+The main configuration currently uses an iOS **14.0 deployment target**.
 
-| Variant | Args file | Minimum iOS |
-| --- | --- | --- |
-| Main/iOS 14+ | `build_args.gn` | 14.0 |
-| iOS 12 | `build_args.ios12.gn` | 12.0 |
+> [!NOTE]
+> Additional build configurations and release packaging files will be added to the repository.
+>
+> The currently published source includes the Chromium source overlay and main GN build configuration needed to build the primary `content_shell` target.
 
-Package the finished build.
+### Release builds
 
-```sh
-xcrun strip -x out/blink15/content_shell.app/Frameworks/*/[!.]*
-./sign_blinker.sh 0.3.1
-```
+Prebuilt Blinker Fluid releases are available from the repository's [Releases/Tags](https://github.com/Nodesclock/Blinker-Fluid/tags) page.
 
-The strip step is optional, but reduces the final package size. Packaging requires `ldid`.
+The released packages include JIT and JITless configurations.
 
-This produces JIT and JITless `.ipa` / `.tipa` packages using the same binary. The `.jit` bundle ID enables runtime JIT. The JIT build intentionally ships without the `dynamic-codesigning` entitlement; JIT is instead provided by the jailbreak through `CS_DEBUGGED`, as the entitlement can prevent the app from launching on some configurations.
+Additional release packaging scripts and build configurations will be published separately so that the complete release packaging process can be reproduced directly from the repository.
 
 [`depot_tools`]: https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
-# Credits:
+## Credits
+
 - [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) for heavily inspiring the creation of Blinker Fluid.
 - [TrollStore](https://github.com/opa334/TrollStore) by [opa334](https://github.com/opa334) and all contributors.
 - [Chromium](https://github.com/chromium/chromium) and [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium).
-- [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) on Instagram for creating the Blinker Fluid app icons. (Great friend and an amazing artist!)
+- [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) on Instagram for creating the Blinker Fluid app icons. Great friend and an amazing artist!
