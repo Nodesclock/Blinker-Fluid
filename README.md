@@ -124,6 +124,62 @@ JIT version is now more stable, though if encountering issues, consider trying o
 ## Source Code?
 Yes! Blinker Fluid is fully open source, and all of the source code is available in this repository.
 
+## Building
+
+> [!IMPORTANT]
+> Build instructions are included below for reference. The deployment target does not guarantee compatibility with every device or iOS version.
+
+Blinker Fluid is a source overlay on Chromium **M149** (`31dce68b`). It is applied to a normal iOS Chromium checkout and builds `content_shell`.
+
+To build the project, you'll need macOS, Xcode 16.2, [`depot_tools`], around 150 GB of free storage, and `ldid` for packaging. Clean builds can take a few hours.
+
+Check out Chromium at the pinned revision.
+
+```sh
+mkdir chromium && cd chromium
+gclient config --unmanaged https://chromium.googlesource.com/chromium/src.git --custom-var=target_os=["ios"]
+gclient sync --nohooks -r 31dce68b925c2b8efc93df832a86a7c0d03e3fa2
+```
+
+Apply the Blinker Fluid source overlay.
+
+`MODIFIED_FILES.txt` lists every changed file, including files from the separate `v8/` and `third_party/angle/` checkouts. A root `git diff` will not show changes inside those checkouts.
+
+```sh
+rsync -a --files-from="$SRC/MODIFIED_FILES.txt" "$SRC/src/" src/
+gclient runhooks
+```
+
+Build the main iOS 15+ variant.
+
+```sh
+cp "$SRC/build_args.gn" out/blink15/args.gn
+gn gen out/blink15
+autoninja -C out/blink15 content_shell
+```
+
+Other build variants use the same steps with different GN args.
+
+| Variant | Args file | Minimum iOS |
+| --- | --- | --- |
+| Main | `build_args.gn` | 14.0 |
+| LiveContainer / sideload | `build_args.compat.gn` | 14.0 |
+| iOS 11 | `build_args.ios11.gn` | 11.0 |
+| iOS 12 | `build_args.ios12.gn` | 12.0 |
+
+Package the finished build.
+
+```sh
+xcrun strip -x out/blink15/content_shell.app/Frameworks/*/[!.]*
+./sign_blinker.sh 0.3.1
+```
+
+The strip step is optional, but reduces the final package size. Packaging requires `ldid`.
+
+This produces JIT and JITless `.ipa` / `.tipa` packages using the same binary. The `.jit` bundle ID enables runtime JIT. The JIT build intentionally ships without the `dynamic-codesigning` entitlement; JIT is instead provided by the jailbreak through `CS_DEBUGGED`, as the entitlement can prevent the app from launching on some configurations.
+
+[`depot_tools`]: https://chromium.googlesource.com/chromium/tools/depot_tools.git
+
 # Credits:
 - [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) for heavily inspiring the creation of Blinker Fluid.
 - [TrollStore](https://github.com/opa334/TrollStore) by [opa334](https://github.com/opa334) and all contributors.
