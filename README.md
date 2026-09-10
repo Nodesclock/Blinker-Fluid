@@ -53,14 +53,14 @@ Not every LiveContainer configuration has been personally tested, so results may
 
 | Device | iOS version | Status |
 | --- | --- | --- |
-| iPhone 13 Pro | iOS 15.4 | â |
-| iPhone 14 Pro Max | iOS 17.2.1 | â |
-| iPhone 6+ | iOS 12.5.7 | â |
-| iPad 7th Generation | iOS 17.5.1 | â |
-| Unknown Device | iOS 15.2 | â |
-| Unknown Device | iOS 16.0.2 | â |
-| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | â |
-| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | â |
+| iPhone 13 Pro | iOS 15.4 | ✅ |
+| iPhone 14 Pro Max | iOS 17.2.1 | ✅ |
+| iPhone 6+ | iOS 12.5.7 | ✅ |
+| iPad 7th Generation | iOS 17.5.1 | ✅ |
+| Unknown Device | iOS 15.2 | ✅ |
+| Unknown Device | iOS 16.0.2 | ✅ |
+| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
+| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 
 If you successfully test Blinker Fluid on another iOS version or device, **please open an issue so compatibility can be documented**.
 
