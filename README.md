@@ -158,16 +158,6 @@ Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The r
 
 Blinker Fluid is a source overlay on Chromium **M149** (`31dce68b`). It is applied to a normal iOS Chromium checkout and builds Chromium's `content_shell`.
 
-To build the project, you'll need:
-
-- macOS
-- Xcode 16.2
-- [`depot_tools`]
-- Around 150 GB of free storage
-- `ldid` for release packaging/signing
-
-Clean Chromium builds can take several hours.
-
 ### Check out Chromium
 
 Create a Chromium checkout and sync to the revision used by Blinker Fluid:
@@ -209,22 +199,7 @@ gn gen out/blink15
 autoninja -C out/blink15 content_shell
 ```
 
-The main configuration currently uses an iOS **14.0 deployment target**.
-
-> [!NOTE]
-> Additional build configurations and release packaging files will be added to the repository.
->
-> The currently published source includes the Chromium source overlay and main GN build configuration needed to build the primary `content_shell` target.
-
-### Release builds
-
-Prebuilt Blinker Fluid releases are available from the repository's [Releases/Tags](https://github.com/Nodesclock/Blinker-Fluid/tags) page.
-
-The released packages include JIT and JITless configurations.
-
-Additional release packaging scripts and build configurations will be published separately so that the complete release packaging process can be reproduced directly from the repository.
-
-[`depot_tools`]: https://chromium.googlesource.com/chromium/tools/depot_tools.git
+The main configuration currently uses an iOS **14.0+ deployment target**.
 
 ## Credits
 
