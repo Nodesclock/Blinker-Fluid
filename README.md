@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.1-blue">
-  <img src="https://img.shields.io/badge/iOS-12%20%26%2014%2B-lightgrey">
-  <img src="https://img.shields.io/badge/Chromium-M149-blue">
-  <img src="https://img.shields.io/badge/status-Experimental-orange">
-  <img src="https://img.shields.io/badge/license-GPL--3.0-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-v.0.3.1-blue">
+  <img alt="iOS" src="https://img.shields.io/badge/iOS-12%20%26%2014%2B-lightgrey">
+  <img alt="Chromium" src="https://img.shields.io/badge/Chromium-M149-blue">
+  <img alt="Status" src="https://img.shields.io/badge/status-Experimental-orange">
+  <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue">
 </p>
 
 <p align="center">
@@ -59,8 +59,8 @@ Not every LiveContainer configuration has been personally tested, so results may
 | iPad 7th Generation | iOS 17.5.1 | ✅ |
 | Unknown Device | iOS 15.2 | ✅ |
 | Unknown Device | iOS 16.0.2 | ✅ |
-| iPhone 11 | iOS 26.2 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
-| Unknown Device | iOS 26.1 [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
+| iPhone 11 | iOS 26.2 — [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
+| Unknown Device | iOS 26.1 — [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 
 If you successfully test Blinker Fluid on another iOS version or device, **please open an issue so compatibility can be documented**.
 
@@ -113,10 +113,10 @@ JITless builds may feel slower and can have issues loading certain websites beca
 ## What is being worked on or may be added in the future
 
 - [x] Better iOS version compatibility  
-  iOS 12 support was added in Blinker Fluid v0.3.1.
+  iOS 12 support was added in Blinker Fluid v.0.3.1.
 
 - [x] JIT support  
-  Officially supported since v0.2.1 and continuing to receive stability and performance improvements.
+  Officially supported since v.0.2.1 and continuing to receive stability and performance improvements.
 
 - [x] Built-in ad/content blocker
 
@@ -141,7 +141,7 @@ JITless builds may feel slower and can have issues loading certain websites beca
 > - Research on porting Blink and V8 to iOS.
 > - Assisting with some parts of development.
 > - Helping me diagnose and fix smaller bugs.
-> - Helping me with translating things to English. (Apologies if README sounds AI generated)
+> - Helping me with translating things to English. (Apologies if README sounds AI generated.)
 
 ## Source Code
 
@@ -151,78 +151,99 @@ The Chromium source overlay and main build configuration are available directly 
 
 Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The repository does not contain the entire Chromium source tree; instead, the `src/` directory contains the files modified by Blinker Fluid and is intended to be applied over a normal Chromium checkout.
 
-## Building v0.3.1
+## Building v.0.3.1
 
-The repository contains a Chromium source overlay. The commands below cover the standard iOS 14+ app and its JIT variant. The full packaging recipe for the uploaded iOS 11/12 builds is not yet documented.
+Run these commands from the complete, extracted Blinker Fluid source folder. New packages are created in a separate build folder; existing downloaded IPAs are not changed.
 
-### Requirements
-
-- macOS with Xcode and its command-line tools selected.
-- Chromium's [depot_tools](https://chromium.googlesource.com/chromium/tools/depot_tools.git/+/HEAD/README.md) installed and available in `PATH`.
-- Git, Python 3, rsync, and enough free space for a full Chromium checkout and build.
-
-The uploaded standard v0.3.1 IPA records Xcode 16.2 and the iOS 18.2 SDK.
-
-### Get the source
-
-Run these commands in a directory where you want to keep both repositories:
+### 1. Download Chromium and apply the source overlay
 
 ```sh
-git clone https://github.com/Nodesclock/Blinker-Fluid.git
-BF_SRC="$(pwd)/Blinker-Fluid"
+export SRC="$PWD"
+export BLINKER_WORK="$(mktemp -d "$HOME/blinker-build.XXXXXX")"
+cd "$BLINKER_WORK"
 
-mkdir chromium
-cd chromium
-gclient config --unmanaged https://chromium.googlesource.com/chromium/src.git
-cat >> .gclient <<'EOF'
-target_os = ["ios"]
-target_os_only = True
-EOF
+gclient config --spec='solutions = [{"name": "src", "url": "https://chromium.googlesource.com/chromium/src.git", "managed": False, "custom_deps": {}, "custom_vars": {}}]; target_os = ["ios"]; target_os_only = True'
+gclient sync --nohooks --revision src@31dce68b925c2b8efc93df832a86a7c0d03e3fa2
 
-gclient sync --nohooks -r src@31dce68b925c2b8efc93df832a86a7c0d03e3fa2
-rsync -a "$BF_SRC/src/" src/
-gclient runhooks
+rsync -a "$SRC/src/" src/
 cd src
+gclient runhooks
 ```
 
-The pinned Chromium revision also pins the V8 revision listed in `BASE_COMMIT.txt`. Apply the overlay after syncing; syncing again can overwrite changes in dependency checkouts.
+### 2. Select one package family
 
-### Build the standard and JIT apps
-
-Set the app version to match v0.3.1:
+**Main release:**
 
 ```sh
-/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.3.1' content/shell/app/ios/ios-app.plist
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0.3.1' content/shell/app/ios/ios-app.plist
+OUT=blink15
+ARGS=build_args.gn
+MIN_OS=14.0
+BUNDLE_ID=com.nodesclock.blinkerfluid
 ```
 
-Standard edition:
+**Legacy release — the current download named `iOS.12.11`:**
 
 ```sh
-mkdir -p out/blink14
-cp "$BF_SRC/build_args.gn" out/blink14/args.gn
-gn gen out/blink14
-autoninja -C out/blink14 content_shell
+OUT=blink12
+ARGS=build_args.ios12.gn
+MIN_OS=12.0
+BUNDLE_ID=com.nodesclock.blinkerfluid.ios12
 ```
 
-JIT edition:
+> [!NOTE]
+> Despite its download filename, the current legacy package targets iOS 12.0 and later, not iOS 11.
+
+### 3. Build
 
 ```sh
-mkdir -p out/blink14-jit
-sed 's/com.nodesclock.blinkerfluid/com.nodesclock.blinkerfluid.jit/'   "$BF_SRC/build_args.gn" > out/blink14-jit/args.gn
-gn gen out/blink14-jit
-autoninja -C out/blink14-jit content_shell
+mkdir -p "out/$OUT"
+cp "$SRC/$ARGS" "out/$OUT/args.gn"
+gn gen "out/$OUT"
+autoninja -C "out/$OUT" -j 2 content_shell
 ```
 
-The bundle identifier selects the JIT edition. Actual JIT availability also depends on the installation environment and runtime checks.
+Wait for each command to finish successfully. Build one family at a time.
 
-### IPA packaging and legacy builds
+### 4. Package the build
 
-The commands above build app bundles with code signing disabled. The project also defines a `content_shell_ipa` packaging target. The release signing/entitlements and final packaging steps still need to be documented before this is a complete recipe for the uploaded IPA/TIPA files.
+Copy the packaging script:
 
-The uploaded iOS 11/12 editions require their own build settings and resource packaging. The supplied `build_args.gn` targets iOS 14.0; lowering that value alone is not a verified legacy-build recipe.
+```sh
+cp "$SRC/sign_blinker.sh" "$BLINKER_WORK/sign_blinker.local.sh"
+```
 
-These instructions have not been validated with a clean rebuild. Older releases require their corresponding source and configuration; this section covers v0.3.1 only.
+In that copy, replace its `APP`, `LDID`, `ENT`, and `ASSETS` assignments with:
+
+```sh
+APP="$BLINKER_WORK/src/out/${BLINKER_OUT:-blink15}/content_shell.app"
+LDID="$(command -v ldid)"
+ENT="$SRC/packaging/minimal.ent"
+ASSETS="$SRC/packaging/blinker_assets"
+```
+
+Then run:
+
+```sh
+BLINKER_OUT="$OUT" \
+BLINKER_MIN_OS="$MIN_OS" \
+BLINKER_BUNDLE_ID="$BUNDLE_ID" \
+BLINKER_NAME_SUFFIX="" \
+zsh "$BLINKER_WORK/sign_blinker.local.sh" \
+  0.3.1 "$BLINKER_WORK/packages/$OUT"
+```
+
+The normal and JIT IPAs, plus their TIPA copies, are in:
+
+```text
+$BLINKER_WORK/packages/<selected OUT>/
+```
+
+Package filenames retain the `v.` prefix, for example:
+
+```text
+Blinker Fluid v.0.3.1.ipa
+Blinker Fluid v.0.3.1 JIT.ipa
+```
 
 ## Credits
 
