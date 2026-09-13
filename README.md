@@ -58,8 +58,9 @@ Not every LiveContainer configuration has been personally tested, so results may
 | iPhone 6+ | iOS 12.5.7 | ✅ |
 | iPad 7th Generation | iOS 17.5.1 | ✅ |
 | Unknown Device | iOS 15.2 | ✅ |
-| iPhone 12 Pro Max| iOS 14.1 | ✅|
+| iPhone 12 Pro Max| iOS 14.1 | ✅ |
 | Unknown Device | iOS 16.0.2 | ✅ |
+| iPad Air 1 | iOS 12.5.8 | ✅ |
 | iPhone 11 | iOS 26.2 — [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 | Unknown Device | iOS 26.1 — [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 
