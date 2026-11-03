@@ -148,7 +148,7 @@ JITless builds may feel slower and can have issues loading certain websites beca
 
 ## Source Code
 
-Yes! Blinker Fluid is fully open source.
+Yes! Blinker Fluid is fully open source. Contributions and pull requests are accepted and greatly appreciated as long as the fix for the issue that is being addressed was fully tested and confirmed to be a valid fix.
 
 The Chromium source overlay and main build configuration are available directly in this repository.
 
