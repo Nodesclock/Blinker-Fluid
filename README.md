@@ -62,6 +62,7 @@ Not every LiveContainer configuration has been personally tested, so results may
 | Unknown Device | iOS 16.0.2 | ✅ |
 | iPad Air 1 | iOS 12.5.8 | ✅ |
 | iPhone 11 Pro Max | iOS 14.2 | ✅ |
+| iPhone Air | iOS 26.0.1 — Sideloaded + Developer certificate| ✅ |
 | iPhone 11 | iOS 26.2 — [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 | Unknown Device | iOS 26.1 — [LiveContainer](https://github.com/LiveContainer/LiveContainer) | ✅ |
 
