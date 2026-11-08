@@ -244,12 +244,101 @@ autoninja -C "out/$OUT" -j 2 content_shell
 
 Wait for each command to finish successfully. Build one family at a time. `-j 2` keeps memory use low; raise it if your Mac has plenty of RAM.
 
+## Building v.0.3.1
+
+Everything needed to build is in this repository. The packaging steps below create the same two packages as the releases: the normal build and the JIT build. They are the same binary with the same entitlements. The only difference is the bundle identifier: when it ends in `.jit`, Blinker Fluid asks for JIT at runtime, which works on jailbroken devices and with JIT enablers.
+
+### Requirements
+
+- A Mac with **Xcode 16.2** (the releases are built with the iOS 18.2 SDK). If several Xcode versions are installed, select it with `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, using the path of your Xcode 16.2.
+- An **iOS Simulator runtime** installed in Xcode (Xcode → Settings → Components). The main build compiles an asset catalog with `actool`, which refuses to run without a simulator runtime, even for a device build.
+- [depot_tools](https://chromium.googlesource.com/chromium/tools/depot_tools.git) on your `PATH`.
+- [`ldid`](https://github.com/ProcursusTeam/ldid) on your `PATH` (for example `brew install ldid`).
+- About **120 GB** of free disk space. The first build takes several hours.
+
+Run the commands from the extracted Blinker Fluid source folder (the folder that contains `src/` and `build_args.gn`). Builds and packages are created in a separate work folder; existing downloaded IPAs are not changed.
+
+### 1. Download Chromium and apply the source overlay
+
+```sh
+export SRC="$PWD"
+export BLINKER_WORK="$(mktemp -d "$HOME/blinker-build.XXXXXX")"
+cd "$BLINKER_WORK"
+
+gclient config --spec='solutions = [{"name": "src", "url": "https://chromium.googlesource.com/chromium/src.git", "managed": False, "custom_deps": {}, "custom_vars": {}}]; target_os = ["ios"]; target_os_only = True'
+gclient sync --nohooks --revision src@31dce68b925c2b8efc93df832a86a7c0d03e3fa2
+
+rsync -a "$SRC/src/" src/
+cd src
+gclient runhooks
+```
+
+`BASE_COMMIT.txt` lists the Chromium and V8 revisions the overlay is made for. `gclient sync` checks out the matching V8 automatically.
+
+### 2. Select one package family
+
+**Main release (iOS 14 and later):**
+
+```sh
+OUT=blink15
+MIN_OS=14.0
+BUNDLE_ID=com.nodesclock.blinkerfluid
+mkdir -p "out/$OUT"
+cp "$SRC/build_args.gn" "out/$OUT/args.gn"
+```
+
+**Legacy release (iOS 12 and later), the download named `iOS.12.11`:**
+
+```sh
+OUT=blink12
+MIN_OS=12.0
+BUNDLE_ID=com.nodesclock.blinkerfluid.ios12
+mkdir -p "out/$OUT"
+cat > "out/$OUT/args.gn" <<'EOF'
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+use_blink = true
+is_debug = false
+is_component_build = false
+ios_enable_code_signing = false
+symbol_level = 0
+mac_sdk_min = "14.5"
+ios_deployment_target = "12.0"
+ios_content_shell_bundle_identifier = "com.nodesclock.blinkerfluid.ios12"
+treat_warnings_as_errors = false
+v8_enable_sandbox = false
+v8_enable_pointer_compression = false
+v8_enable_drumbrake = false
+cppgc_enable_caged_heap = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+dcheck_always_on = false
+content_shell_version = "149.0.7821.0"
+content_shell_major_version = "149"
+blinker_legacy_ios_address_space = true
+blinker_enable_diagnostics = false
+EOF
+```
+
+> [!NOTE]
+> Despite its download filename, the current legacy package targets iOS 12.0 and later, not iOS 11. It turns off V8 pointer compression and shrinks PartitionAlloc's address-space reservations, because 1 GB devices cannot reserve the address space the main build uses.
+
+### 3. Build
+
+```sh
+gn gen "out/$OUT"
+autoninja -C "out/$OUT" -j 2 content_shell
+```
+
+Wait for each command to finish successfully. Build one family at a time. `-j 2` keeps memory use low; raise it if your Mac has plenty of RAM.
+
 ### 4. Package the build
 
 Create the entitlement file used for both packages:
 
 ```sh
-cat > "$BLINKER_WORK/blinker.ent" <<'EOF'
+cat > "$BLINKER_WORK/blinker.ent" <<'ENT'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -262,7 +351,23 @@ cat > "$BLINKER_WORK/blinker.ent" <<'EOF'
 	<true/>
 </dict>
 </plist>
-EOF
+ENT
+```
+
+Create the home-screen icon and the start-page logo from the artwork in `src/content/shell/app/ios/resources/artwork`:
+
+```sh
+ART="$SRC/src/content/shell/app/ios/resources/artwork"
+ICONS="$BLINKER_WORK/icons"
+mkdir -p "$ICONS"
+sips -s format jpeg "$ART/New Project 20 [0B9169A].png" --out "$ICONS/icon.jpg" >/dev/null
+sips -s format png -z 120 120 "$ICONS/icon.jpg" --out "$ICONS/AppIcon60x60@2x.png" >/dev/null
+sips -s format png -z 180 180 "$ICONS/icon.jpg" --out "$ICONS/AppIcon60x60@3x.png" >/dev/null
+sips -s format png -z 152 152 "$ICONS/icon.jpg" --out "$ICONS/AppIcon76x76@2x.png" >/dev/null
+sips -z 120 120 "$ART/27367.png" --out "$ICONS/blinker_logo.png" >/dev/null
+sips -z 240 240 "$ART/27367.png" --out "$ICONS/blinker_logo@2x.png" >/dev/null
+sips -z 360 360 "$ART/27367.png" --out "$ICONS/blinker_logo@3x.png" >/dev/null
+rm "$ICONS/icon.jpg"
 ```
 
 Then package both bundles:
@@ -279,6 +384,7 @@ package() {
   mkdir -p "$work/Payload"
   cp -R "$APP" "$work/Payload/"
   local app="$work/Payload/content_shell.app"
+  cp "$ICONS/"*.png "$app/"
   local plist="$app/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleName $name" "$plist"
@@ -309,7 +415,7 @@ The normal and JIT IPAs, plus their TIPA copies for TrollStore, are in:
 $BLINKER_WORK/packages/<selected OUT>/
 ```
 
-Package filenames have the `v.` prefix, for example:
+Package filenames retain the `v.` prefix, for example:
 
 ```text
 Blinker Fluid v.0.3.1.ipa
@@ -317,7 +423,7 @@ Blinker Fluid v.0.3.1 JIT.ipa
 ```
 
 > [!NOTE]
-> The release packages also add the home-screen icon (`AppIcon60x60@2x.png`, `AppIcon60x60@3x.png`, `AppIcon76x76@2x.png`) and the start-page logo (`blinker_logo.png`, `@2x`, `@3x`) to `content_shell.app`. These images are not in the repository. Without them the home-screen icon is blank and the start page has no logo; everything else is the same as the release.
+> The app icon and logo artwork in `src/content/shell/app/ios/resources/artwork` is all drawn by [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) and is probably not covered by the GPL license.
 
 ## Credits
 
