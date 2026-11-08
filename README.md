@@ -157,7 +157,17 @@ Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The r
 
 ## Building v.0.3.1
 
-Run these commands from the complete, extracted Blinker Fluid source folder. New packages are created in a separate build folder; existing downloaded IPAs are not changed.
+Everything needed to build is in this repository. The packaging steps below create the same two packages as the releases: the normal build and the JIT build. They are the same binary with the same entitlements. The only difference is the bundle identifier: when it ends in `.jit`, Blinker Fluid asks for JIT at runtime, which works on jailbroken devices and with JIT enablers.
+
+### Requirements
+
+- A Mac with **Xcode 16.2** (the releases are built with the iOS 18.2 SDK).
+- An **iOS Simulator runtime** installed in Xcode (Xcode → Settings → Components). The main build compiles an asset catalog with `actool`, which refuses to run without a simulator runtime, even for a device build.
+- [depot_tools](https://chromium.googlesource.com/chromium/tools/depot_tools.git) on your `PATH`.
+- [`ldid`](https://github.com/ProcursusTeam/ldid) on your `PATH` (for example `brew install ldid`).
+- Around **120 GB** of free disk space. The first build takes a couple hours or so.
+
+Run the commands from the extracted Blinker Fluid source folder (the folder that contains `src/` and `build_args.gn`). Builds and packages are created in a separate work folder; existing downloaded IPAs are not changed.
 
 ### 1. Download Chromium and apply the source overlay
 
@@ -174,84 +184,146 @@ cd src
 gclient runhooks
 ```
 
+`BASE_COMMIT.txt` lists the Chromium and V8 revisions the overlay is made for. `gclient sync` checks out the matching V8 automatically.
+
 ### 2. Select one package family
 
-**Main release:**
+**Main release (iOS 14 and later):**
 
 ```sh
 OUT=blink15
-ARGS=build_args.gn
 MIN_OS=14.0
 BUNDLE_ID=com.nodesclock.blinkerfluid
+mkdir -p "out/$OUT"
+cp "$SRC/build_args.gn" "out/$OUT/args.gn"
 ```
 
-**Legacy release — the current download named `iOS.12.11`:**
+**Legacy release (iOS 12 and later), the download named `iOS.12.11`:**
 
 ```sh
 OUT=blink12
-ARGS=build_args.ios12.gn
 MIN_OS=12.0
 BUNDLE_ID=com.nodesclock.blinkerfluid.ios12
+mkdir -p "out/$OUT"
+cat > "out/$OUT/args.gn" <<'EOF'
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+use_blink = true
+is_debug = false
+is_component_build = false
+ios_enable_code_signing = false
+symbol_level = 0
+mac_sdk_min = "14.5"
+ios_deployment_target = "12.0"
+ios_content_shell_bundle_identifier = "com.nodesclock.blinkerfluid.ios12"
+treat_warnings_as_errors = false
+v8_enable_sandbox = false
+v8_enable_pointer_compression = false
+v8_enable_drumbrake = false
+cppgc_enable_caged_heap = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+dcheck_always_on = false
+content_shell_version = "149.0.7821.0"
+content_shell_major_version = "149"
+blinker_legacy_ios_address_space = true
+blinker_enable_diagnostics = false
+EOF
 ```
 
 > [!NOTE]
-> Despite its download filename, the current legacy package targets iOS 12.0 and later, not iOS 11.
+> Despite its download filename, the current legacy package targets iOS 12.0 and later, not iOS 11. It turns off V8 pointer compression and shrinks PartitionAlloc's address-space reservations, because 1 GB devices cannot reserve the address space the main build uses.
 
 ### 3. Build
 
 ```sh
-mkdir -p "out/$OUT"
-cp "$SRC/$ARGS" "out/$OUT/args.gn"
 gn gen "out/$OUT"
 autoninja -C "out/$OUT" -j 2 content_shell
 ```
 
-Wait for each command to finish successfully. Build one family at a time.
+Wait for each command to finish successfully. Build one family at a time. `-j 2` keeps memory use low; raise it if your Mac has plenty of RAM.
 
 ### 4. Package the build
 
-Copy the packaging script:
+Create the entitlement file used for both packages:
 
 ```sh
-cp "$SRC/sign_blinker.sh" "$BLINKER_WORK/sign_blinker.local.sh"
+cat > "$BLINKER_WORK/blinker.ent" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+</dict>
+</plist>
+EOF
 ```
 
-In that copy, replace its `APP`, `LDID`, `ENT`, and `ASSETS` assignments with:
+Then package both bundles:
 
 ```sh
-APP="$BLINKER_WORK/src/out/${BLINKER_OUT:-blink15}/content_shell.app"
-LDID="$(command -v ldid)"
-ENT="$SRC/packaging/minimal.ent"
-ASSETS="$SRC/packaging/blinker_assets"
+VERSION=0.3.1
+APP="$BLINKER_WORK/src/out/$OUT/content_shell.app"
+PKG="$BLINKER_WORK/packages/$OUT"
+mkdir -p "$PKG"
+
+package() {
+  local bundle_id="$1" name="$2" ipa="$3"
+  local work="$(mktemp -d)"
+  mkdir -p "$work/Payload"
+  cp -R "$APP" "$work/Payload/"
+  local app="$work/Payload/content_shell.app"
+  local plist="$app/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName $name" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $name" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion $MIN_OS" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$plist"
+  for framework in "$app"/Frameworks/*.framework; do
+    local binary="$framework/$(basename "$framework" .framework)"
+    [ -f "$binary" ] && ldid -S "$binary"
+  done
+  ldid -S"$BLINKER_WORK/blinker.ent" "$app/content_shell"
+  rm -f "$ipa"
+  (cd "$work" && zip -q9 -r "$ipa" Payload)
+  rm -rf "$work"
+  echo "$ipa"
+}
+
+package "$BUNDLE_ID" "Blinker Fluid" "$PKG/Blinker Fluid v.$VERSION.ipa"
+package "$BUNDLE_ID.jit" "Blinker Fluid JIT" "$PKG/Blinker Fluid v.$VERSION JIT.ipa"
+cp "$PKG/Blinker Fluid v.$VERSION.ipa" "$PKG/Blinker Fluid v.$VERSION TS.tipa"
+cp "$PKG/Blinker Fluid v.$VERSION JIT.ipa" "$PKG/Blinker Fluid v.$VERSION JIT TS.tipa"
 ```
 
-Then run:
-
-```sh
-BLINKER_OUT="$OUT" \
-BLINKER_MIN_OS="$MIN_OS" \
-BLINKER_BUNDLE_ID="$BUNDLE_ID" \
-BLINKER_NAME_SUFFIX="" \
-zsh "$BLINKER_WORK/sign_blinker.local.sh" \
-  0.3.1 "$BLINKER_WORK/packages/$OUT"
-```
-
-The normal and JIT IPAs, plus their TIPA copies, are in:
+The normal and JIT IPAs, plus their TIPA copies for TrollStore, are in:
 
 ```text
 $BLINKER_WORK/packages/<selected OUT>/
 ```
 
-Package filenames retain the `v.` prefix, for example:
+Package filenames have the `v.` prefix, for example:
 
 ```text
 Blinker Fluid v.0.3.1.ipa
 Blinker Fluid v.0.3.1 JIT.ipa
 ```
 
+> [!NOTE]
+> The release packages also add the home-screen icon (`AppIcon60x60@2x.png`, `AppIcon60x60@3x.png`, `AppIcon76x76@2x.png`) and the start-page logo (`blinker_logo.png`, `@2x`, `@3x`) to `content_shell.app`. These images are not in the repository. Without them the home-screen icon is blank and the start page has no logo; everything else is the same as the release.
+
 ## Credits
 
 - [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton) for heavily inspiring the creation of Blinker Fluid.
 - [TrollStore](https://github.com/opa334/TrollStore) by [opa334](https://github.com/opa334) and all contributors.
-- [Chromium](https://github.com/chromium/chromium) and [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium).
-- [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) on Instagram for creating the Blinker Fluid app icons. Great friend and an amazing artist!
+- [Chromium](https://github.com/chromium/chromium) for being most of Blinker Fluid.
+- [Ungoogled Chromium](https://github.com/ungoogled-software/ungoogled-chromium) for heavily inspiring the creation of Blinker Fluid too.
+- [EasyList and EasyPrivacy](https://easylist.to) by the EasyList creators, used as the built-in ad and tracker blocking lists.
+- [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) on Instagram for creating the Blinker Fluid app icons and all Blinker Fluid art. Great friend and an amazing artist!
