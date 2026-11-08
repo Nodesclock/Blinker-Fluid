@@ -1,0 +1,43 @@
+name: Перевірки
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  files:
+    name: Файли зі списку
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Кожен файл з MODIFIED_FILES.txt є в src
+        run: |
+          missing=0
+          while IFS= read -r file || [ -n "$file" ]; do
+            file="${file%$'\r'}"
+            [ -z "$file" ] && continue
+            if [ ! -e "src/$file" ]; then
+              echo "Нема src/$file"
+              missing=1
+            fi
+          done < MODIFIED_FILES.txt
+          exit $missing
+
+  host-tests:
+    name: Тести логіки
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Googletest тієї ревізії, що в Chromium
+        working-directory: src
+        run: |
+          git clone --quiet https://github.com/google/googletest.git third_party/googletest/src
+          git -C third_party/googletest/src checkout --quiet 4fe3307fb2d9f86d19777c7eb0e4809e9694dde7
+          mkdir -p testing/gtest/include/gtest
+          echo '#include "third_party/googletest/src/googletest/include/gtest/gtest.h"' > testing/gtest/include/gtest/gtest.h
+      - name: Запуск тестів
+        working-directory: src
+        env:
+          CXX: clang++
+        run: bash tools/blinker/run_host_tests.sh
