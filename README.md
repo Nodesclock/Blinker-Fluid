@@ -49,6 +49,8 @@ Blinker Fluid should theoretically work on iOS 11 and iOS 14, but these versions
 
 Blinker Fluid may also work on other iOS versions through [LiveContainer](https://github.com/LiveContainer/LiveContainer). The JIT build may also be usable with tools such as StikDebug.
 
+For iOS 5-10 devices, I would recommend [Venetium-iOS](https://github.com/Computershik73/Venetium-iOS). Venetium is another Chromium port for iOS meant for iOS 10 all the way down to iOS 5. It's still a very early project, though it looks promising. Venetium is NOT maintained by me, it is maintained by [Ilya Vysotsky](https://github.com/Computershik73) so do not report any Venetium issues here, this is the wrong place for that.
+
 Not every LiveContainer configuration has been personally tested, so results may vary.
 
 | Device | iOS version | Status |
