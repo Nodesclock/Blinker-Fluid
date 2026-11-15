@@ -163,7 +163,7 @@ Everything needed to build is in this repository. The packaging steps below crea
 
 ### Requirements
 
-- A Mac with **Xcode 16.2** (the releases are built with the iOS 18.2 SDK). If several Xcode versions are installed, select it with `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, using the path of your Xcode 16.2.
+- A Mac with **Xcode 16.2** (the releases are built with the iOS 18.2 SDK).
 - An **iOS Simulator runtime** installed in Xcode (Xcode → Settings → Components). The main build compiles an asset catalog with `actool`, which refuses to run without a simulator runtime, even for a device build.
 - [depot_tools](https://chromium.googlesource.com/chromium/tools/depot_tools.git) on your `PATH`.
 - [`ldid`](https://github.com/ProcursusTeam/ldid) on your `PATH` (for example `brew install ldid`).
