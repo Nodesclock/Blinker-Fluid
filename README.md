@@ -336,7 +336,7 @@ Blinker Fluid v.0.3.1 JIT.ipa
 ```
 
 > [!NOTE]
-> The app icon and logo artwork in `src/content/shell/app/ios/resources/artwork` is all drawn by [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) and is probably not covered by the GPL license.
+> The app icon and logo artwork in `src/content/shell/app/ios/resources/artwork` is all drawn by [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) and is not covered by any license.
 
 ## Credits
 
