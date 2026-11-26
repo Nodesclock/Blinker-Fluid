@@ -1,6 +1,6 @@
-❤️ Support the Blinker Fluid and my other projects!
+❤️ Support Blinker Fluid and my other projects!
 
-If you find this Blinker Fluid useful and would like to support its development, donations are really appreciated. Every donation helps with development, testing, and keeping the Blinker Fluid updated and maintained.
+If you find Blinker Fluid useful and would like to support its development, donations are really appreciated. Every donation helps with development, testing, and keeping Blinker Fluid updated and maintained.
 
 Litecoin (LTC)
 
