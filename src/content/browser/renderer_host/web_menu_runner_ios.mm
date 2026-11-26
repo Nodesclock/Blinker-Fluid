@@ -33,7 +33,6 @@
   // Interaction for displaying a popup menu.
   UIContextMenuInteraction* __strong _selectContextMenuInteraction;
 
-  // Native action sheet used by iOS 12, before UIContextMenuInteraction.
   UIAlertController* __strong _legacyMenuController;
   NSMutableArray<NSDictionary*>* __strong _legacyMenuItems;
 
@@ -49,7 +48,7 @@
   if ((self = [super init])) {
     _delegate = delegate;
 
-    DCHECK_GE(index, 0);
+    CHECK_GE(index, 0, base::NotFatalUntil::M152);
     _selectedIndex = static_cast<size_t>(index);
 
     [self createMenu:items];

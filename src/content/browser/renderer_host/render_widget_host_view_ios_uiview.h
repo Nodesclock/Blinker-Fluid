@@ -8,6 +8,8 @@
 #import <BrowserEngineKit/BrowserEngineKit.h>
 #import <UIKit/UIKit.h>
 
+@class BlinkerSelectionOverlay;
+@class BlinkerTextLoupe;
 @class IOSExtendedTextInputTraits;
 
 #include "base/memory/weak_ptr.h"
@@ -15,24 +17,39 @@
 #include "content/browser/renderer_host/render_widget_host_view_ios.h"
 #include "third_party/blink/public/mojom/input/input_handler.mojom-forward.h"
 #include "ui/accelerated_widget_mac/ca_layer_frame_sink_provider.h"
+#include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/vector2d_f.h"
 
 inline constexpr CGFloat kInputAccessoryToolbarBottomMargin = 8;
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-// BrowserEngineKit members are initialized only on iOS 17.4+.
 @interface RenderWidgetUIView
     : CALayerFrameSinkProvider <BETextInput, UITextInput,
                                 UITextInteractionDelegate> {
   base::WeakPtr<content::RenderWidgetHostViewIOS> _view;
   IOSExtendedTextInputTraits* _extendedTextInputTraits;
+  // Остання віддана клавіатурі велика літера, -1 до першої
+  NSInteger _blinkAppliedAutocap;
   id<BETextInputDelegate> be_text_input_delegate_;
   __weak id<UITextInputDelegate> input_delegate_;
   BETextInteraction* text_interaction_;
-  // Stands in for text_interaction_ below iOS 17.4, attached only while a text
-  // field is focused. See -updateLegacyTextInteraction.
+  // замість text_interaction_ нижче iOS 17.4
   UITextInteraction* _legacyTextInteraction;
+  UITextInteractionMode _legacyTextInteractionMode;
+  BlinkerSelectionOverlay* _selectionOverlay;
+  BlinkerTextLoupe* _selectionLoupe;
+  int _draggingHandle;
+  UITouch* _handleDragTouch;
+  CGPoint _handleDragOffset;
+  CGPoint _handleDragLastTouch;
+  NSTimer* _selectionAutoscrollTimer;
+  BOOL _longPressSelectionPending;
+  NSHashTable<UITouch*>* _cancelledTouches;
+  BOOL _hasLongPressDragAnchor;
+  CGPoint _longPressDragAnchor;
+  NSTimeInterval _touchSequenceStartTime;
+  std::u16string _selectedTextAtTouchStart;
   BOOL _isEditable;
   UIView* _inputAccessoryContainerView;
   UIBarButtonItem* _previousAccessoryButton;
@@ -40,6 +57,7 @@ inline constexpr CGFloat kInputAccessoryToolbarBottomMargin = 8;
   std::u16string _markedText;
   std::optional<input::NativeWebKeyboardEvent> _currentKeyDownEvent;
   std::optional<gfx::Vector2dF> _viewOffsetDuringTouchSequence;
+  CGFloat _keyboardHeight;
 }
 
 - (instancetype)initWithWidget:
@@ -50,6 +68,8 @@ inline constexpr CGFloat kInputAccessoryToolbarBottomMargin = 8;
 - (void)showKeyboard:(bool)has_text withBounds:(CGRect)bounds;
 - (void)hideKeyboard;
 - (void)selectionDidChange;
+- (void)refreshSelectionOverlay;
+- (CGFloat)keyboardHeight;
 
 - (BETextInteraction*)textInteraction API_AVAILABLE(ios(17.4));
 - (void)updateView:(UIScrollView*)view;

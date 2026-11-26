@@ -2,17 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/342213636): Remove this and spanify to fix the errors.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "content/browser/child_process_launcher_helper.h"
 
 #import <BrowserEngineKit/BrowserEngineKit.h>
 
 #include <atomic>
 #include <list>
+#include <string_view>
 
 #include "base/apple/mach_port_rendezvous_ios.h"
 #include "base/files/file.h"
@@ -177,17 +173,18 @@ class ProcessStorage : public ProcessStorageBase {
 
 std::optional<mojo::NamedPlatformChannel>
 ChildProcessLauncherHelper::CreateNamedPlatformChannelOnLauncherThread() {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M160);
   return std::nullopt;
 }
 
 void ChildProcessLauncherHelper::BeforeLaunchOnClientThread() {
-  DCHECK(client_task_runner_->RunsTasksInCurrentSequence());
+  CHECK(client_task_runner_->RunsTasksInCurrentSequence(),
+        base::NotFatalUntil::M160);
 }
 
 std::unique_ptr<PosixFileDescriptorInfo>
 ChildProcessLauncherHelper::GetFilesToMap() {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M160);
   return CreateDefaultPosixFilesToMap(
       child_process_id(), mojo_channel_->remote_endpoint(),
       /*files_to_preload=*/{}, GetProcessType(), command_line());
@@ -198,7 +195,7 @@ bool ChildProcessLauncherHelper::BeforeLaunchOnLauncherThread(
     base::LaunchOptions* options) {
   mojo::PlatformHandle endpoint =
       mojo_channel_->TakeRemoteEndpoint().TakePlatformHandle();
-  DCHECK(endpoint.is_valid_mach_receive());
+  CHECK(endpoint.is_valid_mach_receive(), base::NotFatalUntil::M160);
   options->mach_ports_for_rendezvous.insert(std::make_pair(
       'mojo', base::MachRendezvousPort(endpoint.TakeMachReceiveRight())));
   return true;
@@ -210,7 +207,7 @@ ChildProcessLauncherHelper::LaunchProcessOnLauncherThread(
     std::unique_ptr<PosixFileDescriptorInfo> files_to_register,
     bool* is_synchronous_launch,
     int* launch_result) {
-  DCHECK(options);
+  CHECK(options, base::NotFatalUntil::M160);
   *is_synchronous_launch = false;
   rendezvous_server_ = std::make_unique<base::MachPortRendezvousServerIOS>(
       options->mach_ports_for_rendezvous);
@@ -285,7 +282,7 @@ ChildProcessLauncherHelper::LaunchProcessOnLauncherThread(
 void ChildProcessLauncherHelper::OnChildProcessStarted(
     pid_t process_id,
     std::unique_ptr<LaunchResult> launch_result) {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M160);
   scoped_refptr<ChildProcessLauncherHelper> ref(this);
   Release();  // Balances with LaunchProcessOnLauncherThread.
 
@@ -314,7 +311,7 @@ void ChildProcessLauncherHelper::OnChildProcessStarted(
         }
 
         const char* message_type = xpc_dictionary_get_string(event, "message");
-        if (message_type && strcmp(message_type, "layerHandle") == 0) {
+        if (message_type && std::string_view(message_type) == "layerHandle") {
           // We only expect this message from the GPU process.
           if (!is_gpu_process) {
             xpc_connection_cancel(xpc_connection);
@@ -342,11 +339,6 @@ void ChildProcessLauncherHelper::OnChildProcessStarted(
                                               error:&error];
                     CALayerFrameSinkProvider* sink =
                         [CALayerFrameSinkProvider lookupByHandle:view_handle];
-                    // iOS-15 port: CALayerFrameSinkProvider is now a plain UIView
-                    // (BELayerHierarchyHostingView.handle no longer exists). This
-                    // BEK multi-process display handoff is unused in our
-                    // single-process build (the GPU attaches its CALayer in
-                    // process instead).
                     (void)sink;
                     (void)be_handle;
                   },
@@ -524,15 +516,16 @@ bool ChildProcessLauncherHelper::TerminateProcess(const base::Process& process,
 // static
 void ChildProcessLauncherHelper::ForceNormalProcessTerminationSync(
     ChildProcessLauncherHelper::Process process) {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M160);
   // Client has gone away, so just kill the process.  Using exit code 0 means
   // that UMA won't treat this as a crash.
   process.process.Terminate(RESULT_CODE_NORMAL_EXIT, false);
   base::EnsureProcessTerminated(std::move(process.process));
 }
 
-void ChildProcessLauncherHelper::SetProcessPriorityOnLauncherThread(
-    base::Process process,
+// static
+void ChildProcessLauncherHelper::ApplyProcessPriorityOnLauncherThread(
+    base::Process& process,
     base::Process::Priority priority) {}
 
 // static

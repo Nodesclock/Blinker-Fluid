@@ -153,6 +153,23 @@ UIReturnKeyType ReturnKeyTypeForState(const ui::mojom::TextInputState& state) {
   }
 }
 
+// Без цього iOS не знає, що в полі логін чи пароль. Вона вставляла пароль у
+// будь-яке поле, а логін клала у рядок адреси браузера.
+UITextContentType ContentTypeForState(const ui::mojom::TextInputState& state) {
+  if (state.type == ui::TextInputType::TEXT_INPUT_TYPE_PASSWORD ||
+      (state.flags & ui::TEXT_INPUT_FLAG_AUTOCOMPLETE_PASSWORD)) {
+    return UITextContentTypePassword;
+  }
+  if (state.type == ui::TextInputType::TEXT_INPUT_TYPE_EMAIL ||
+      (state.flags & ui::TEXT_INPUT_FLAG_AUTOCOMPLETE_USERNAME)) {
+    return UITextContentTypeUsername;
+  }
+  if (state.type == ui::TextInputType::TEXT_INPUT_TYPE_URL) {
+    return UITextContentTypeURL;
+  }
+  return nil;
+}
+
 BOOL SingleLineDocumentForState(const ui::mojom::TextInputState& state) {
   switch (state.type) {
     case ui::TextInputType::TEXT_INPUT_TYPE_NONE:
@@ -199,8 +216,12 @@ BOOL TypingAdaptationEnabledForState(const ui::mojom::TextInputState& state) {
       state.type == ui::TextInputType::TEXT_INPUT_TYPE_PASSWORD;
   BOOL singleLineDocument = SingleLineDocumentForState(state);
   BOOL typingAdaptationEnabled = TypingAdaptationEnabledForState(state);
+  UITextContentType contentType = ContentTypeForState(state);
+  BOOL contentTypeChanged = ![(self.textContentType ?: @"")
+      isEqualToString:(contentType ?: @"")];
 
-  BOOL changed = self.autocapitalizationType != autocapitalizationType ||
+  BOOL changed = contentTypeChanged ||
+                 self.autocapitalizationType != autocapitalizationType ||
                  self.autocorrectionType != autocorrectionType ||
                  self.spellCheckingType != spellCheckingType ||
                  self.smartQuotesType != smartQuotesType ||
@@ -221,6 +242,7 @@ BOOL TypingAdaptationEnabledForState(const ui::mojom::TextInputState& state) {
   self.secureTextEntry = secureTextEntry;
   self.singleLineDocument = singleLineDocument;
   self.typingAdaptationEnabled = typingAdaptationEnabled;
+  self.textContentType = contentType;
   return changed;
 }
 

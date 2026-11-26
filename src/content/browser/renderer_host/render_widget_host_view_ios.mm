@@ -17,6 +17,7 @@
 #include "cc/mojom/render_frame_metadata.mojom-shared.h"
 #include "components/input/events_helper.h"
 #include "components/input/render_widget_host_input_event_router.h"
+#include "components/input/render_widget_host_view_input.h"
 #include "components/input/switches.h"
 #include "components/viz/common/features.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
@@ -51,8 +52,7 @@
 #include "content/browser/renderer_host/render_widget_host_view_ios_uiview.h"
 #endif
 
-// Implemented by the shell's window delegate, which owns the UI. Weak so
-// content targets that link this file without the shell still resolve.
+// weak, щоб content таргети без shell теж лінкувались
 extern "C" __attribute__((weak)) void BlinkOverscrollPull(float pull_points,
                                                           bool allowed);
 
@@ -100,6 +100,8 @@ extern "C" int BlinkActiveRWHVCount() {
 
 namespace content {
 
+using input::ScopedInputDispatchPin;
+
 // This class holds strongly so we don't leak that in the header of the
 // RenderWidgetHostViewIOS.
 class UIViewHolder {
@@ -112,13 +114,13 @@ class UIViewHolder {
 
 RenderWidgetHostViewIOS::RenderWidgetHostViewIOS(RenderWidgetHost* widget)
     : RenderWidgetHostViewBase(widget),
-      gesture_provider_(
+      gesture_provider_(base::MakeRefCounted<ui::FilteredGestureProvider>(
           ui::GetGestureProviderConfig(
               ui::GestureProviderConfigType::CURRENT_PLATFORM,
               GetUIThreadTaskRunner({BrowserTaskType::kUserInput})),
-          this) {
+          this)),
+      use_fixed_size_for_testing_(IsTesting()) {
   ++g_active_rwhv_count;
-
   ui_view_ = std::make_unique<UIViewHolder>();
   ui_view_->view_ =
       [[RenderWidgetUIView alloc] initWithWidget:weak_factory_.GetWeakPtr()];
@@ -133,7 +135,7 @@ RenderWidgetHostViewIOS::RenderWidgetHostViewIOS(RenderWidgetHost* widget)
       [ui_view_->view_ viewHandle], this, host()->IsHidden(),
       host()->GetFrameSinkId());
 
-  if (IsTesting()) {
+  if (use_fixed_size_for_testing_) {
     view_bounds_ = GetDefaultSizeForTesting();
     browser_compositor_->UpdateSurfaceFromUIView(GetViewBounds().size());
   }
@@ -143,8 +145,7 @@ RenderWidgetHostViewIOS::RenderWidgetHostViewIOS(RenderWidgetHost* widget)
   // Let the page-level input event router know about our surface ID
   // namespace for surface-based hit testing.
   if (ShouldRouteEvents()) {
-    host()->delegate()->GetInputEventRouter()->AddFrameSinkIdOwner(
-        GetFrameSinkId(), this);
+    SetIsFrameSinkIdOwner(true);
   }
 
   if (GetTextInputManager()) {
@@ -160,25 +161,33 @@ RenderWidgetHostViewIOS::RenderWidgetHostViewIOS(RenderWidgetHost* widget)
 }
 
 RenderWidgetHostViewIOS::~RenderWidgetHostViewIOS() {
+  gesture_provider_->Shutdown();
   if (g_active_rwhv_count > 0) {
     --g_active_rwhv_count;
   }
 }
 
-void RenderWidgetHostViewIOS::Destroy() {
+void RenderWidgetHostViewIOS::CleanUpHostObservers() {
+  if (host()) {
+    host()->render_frame_metadata_provider()->RemoveObserver(this);
+    host()->ViewDestroyed();
+  }
+}
+
+void RenderWidgetHostViewIOS::OnDestroyOrDefer() {
+  weak_factory_.InvalidateWeakPtrs();
+  if (text_input_manager_) {
+    text_input_manager_->RemoveObserver(this);
+  }
+}
+
+void RenderWidgetHostViewIOS::DestroyImpl() {
   if (browser_compositor_) {
     browser_compositor_->SetParentUiLayer(nullptr);
   }
   [ui_view_->view_ removeView];
-  host()->render_frame_metadata_provider()->RemoveObserver(this);
-  if (text_input_manager_) {
-    text_input_manager_->RemoveObserver(this);
-  }
   browser_compositor_.reset();
-  // Call this before the derived class is destroyed so that virtual function
-  // calls back into `this` still work.
-  NotifyObserversAboutShutdown();
-  RenderWidgetHostViewBase::Destroy();
+
   delete this;
 }
 
@@ -187,9 +196,10 @@ bool RenderWidgetHostViewIOS::IsSurfaceAvailableForCopy() {
       ->CanCopyFromCompositingSurface();
 }
 
-void RenderWidgetHostViewIOS::CopyFromSurface(
+void RenderWidgetHostViewIOS::CopyFromSurfaceImpl(
     const gfx::Rect& src_rect,
     const gfx::Size& dst_size,
+    bool is_copy_request_secure,
     base::TimeDelta timeout,
     base::OnceCallback<void(const content::CopyFromSurfaceResult&)> callback) {
   base::WeakPtr<RenderWidgetHostImpl> popup_host;
@@ -197,13 +207,13 @@ void RenderWidgetHostViewIOS::CopyFromSurface(
   RenderWidgetHostViewBase::CopyMainAndPopupFromSurface(
       host()->GetWeakPtr(),
       browser_compositor_->GetDelegatedFrameHost()->GetWeakPtr(), popup_host,
-      popup_frame_host, src_rect, dst_size, GetDeviceScaleFactor(), timeout,
-      std::move(callback));
+      popup_frame_host, src_rect, dst_size, GetDeviceScaleFactor(),
+      is_copy_request_secure, timeout, std::move(callback));
 }
 
 ui::FilteredGestureProvider*
 RenderWidgetHostViewIOS::GetFilteredGestureProviderForTesting() {
-  return &gesture_provider_;
+  return gesture_provider_.get();
 }
 
 void RenderWidgetHostViewIOS::InitAsChild(gfx::NativeView parent_view) {
@@ -256,7 +266,7 @@ void RenderWidgetHostViewIOS::Focus() {
 }
 
 bool RenderWidgetHostViewIOS::HasFocus() {
-  return is_first_responder_;
+  return has_focus_for_testing_.value_or(is_first_responder_);
 }
 
 gfx::Rect RenderWidgetHostViewIOS::GetViewBounds() {
@@ -271,14 +281,6 @@ blink::mojom::PointerLockResult RenderWidgetHostViewIOS::ChangePointerLock(
 }
 void RenderWidgetHostViewIOS::UnlockPointer() {}
 
-uint32_t RenderWidgetHostViewIOS::GetCaptureSequenceNumber() const {
-  return latest_capture_sequence_number_;
-}
-
-void RenderWidgetHostViewIOS::EnsureSurfaceSynchronizedForWebTest() {
-  ++latest_capture_sequence_number_;
-  browser_compositor_->ForceNewSurfaceId();
-}
 
 void RenderWidgetHostViewIOS::TakeFallbackContentFrom(
     RenderWidgetHostView* view) {}
@@ -330,7 +332,7 @@ void RenderWidgetHostViewIOS::UpdateCursor(const ui::Cursor& cursor) {}
 void RenderWidgetHostViewIOS::SetIsLoading(bool is_loading) {}
 
 void RenderWidgetHostViewIOS::RenderProcessGone() {
-  Destroy();
+  DestroyOrDefer();
 }
 
 void RenderWidgetHostViewIOS::ShowWithVisibility(
@@ -393,13 +395,28 @@ bool RenderWidgetHostViewIOS::IsShowing() {
   return is_visible_ && [ui_view_->view_ window];
 }
 
-gfx::Rect RenderWidgetHostViewIOS::GetBoundsInRootWindow() {
+gfx::Rect RenderWidgetHostViewIOS::GetBoundsInScreen() {
   return GetViewBounds();
 }
 
 gfx::Size RenderWidgetHostViewIOS::GetRequestedRendererSize() {
   return GetViewBounds().size();
 }
+
+#if !BUILDFLAG(IS_IOS_TVOS)
+gfx::Size RenderWidgetHostViewIOS::GetVisibleViewportSize() {
+  int bottom_adjust =
+      std::max(0, static_cast<int>([ui_view_->view_ keyboardHeight]));
+  gfx::Rect requested_rect(GetRequestedRendererSize());
+  requested_rect.Inset(gfx::Insets::TLBR(0, 0, bottom_adjust, 0));
+  return requested_rect.size();
+}
+
+gfx::Size RenderWidgetHostViewIOS::GetVisibleViewportSizeDevicePx() {
+  return gfx::ScaleToCeiledSize(GetVisibleViewportSize(),
+                                GetDeviceScaleFactor());
+}
+#endif  // !BUILDFLAG(IS_IOS_TVOS)
 
 std::optional<DisplayFeature> RenderWidgetHostViewIOS::GetDisplayFeature() {
   return display_feature_;
@@ -458,7 +475,7 @@ SkColor RenderWidgetHostViewIOS::BrowserCompositorIOSGetGutterColor() {
   // When making an element on the page fullscreen the element's background
   // may not match the page's, so use black as the gutter color to avoid
   // flashes of brighter colors during the transition.
-  if (host()->delegate() && host()->delegate()->IsFullscreen()) {
+  if (host() && host()->delegate() && host()->delegate()->IsFullscreen()) {
     return SK_ColorBLACK;
   }
   if (GetBackgroundColor()) {
@@ -468,6 +485,9 @@ SkColor RenderWidgetHostViewIOS::BrowserCompositorIOSGetGutterColor() {
 }
 
 bool RenderWidgetHostViewIOS::OnBrowserCompositorSurfaceIdChanged() {
+  if (!host()) {
+    return false;
+  }
   return host()->SynchronizeVisualProperties();
 }
 
@@ -483,6 +503,13 @@ RenderWidgetHostViewIOS::CollectSurfaceIdsForEviction() {
 }
 
 void RenderWidgetHostViewIOS::UpdateScreenInfo() {
+  const gfx::Size native_view_size = gfx::Rect([ui_view_->view_ bounds]).size();
+  // UIKit autoresizing does not refresh the cached renderer size. Update it
+  // before publishing visual properties, preserving resize deferral during
+  // scrolling and fixed web-test sizing.
+  const bool renderer_size_changed =
+      UpdateViewBounds(gfx::Rect(view_bounds_.origin(), native_view_size));
+
   if (host()->delegate()) {
     host()->delegate()->SendScreenRects();
   }
@@ -492,23 +519,22 @@ void RenderWidgetHostViewIOS::UpdateScreenInfo() {
       display_screen->GetScreenInfosNearestDisplay(
           display_screen->GetPrimaryDisplay().id());
 
-  gfx::Rect view_bounds_dips([ui_view_->view_ bounds]);
   const bool screen_info_changed = screen_infos_ != new_screen_infos;
-  const bool size_changed =
-      view_bounds_dips.size() != browser_compositor_->GetRendererSize();
+  const bool compositor_size_changed =
+      native_view_size != browser_compositor_->GetRendererSize();
   screen_infos_ = std::move(new_screen_infos);
 
-  const auto& current_screen = screen_infos_.current();
-
-  if (!IsTesting() && (size_changed || screen_info_changed)) {
-    browser_compositor_->UpdateSurfaceFromUIView(view_bounds_dips.size());
+  if (!use_fixed_size_for_testing_ &&
+      (compositor_size_changed || screen_info_changed)) {
+    browser_compositor_->UpdateSurfaceFromUIView(native_view_size);
   }
   ComputeDisplayFeature();
 
-  // Notify the associated RenderWidgetHostImpl when screen info has changed.
-  // That will synchronize visual properties needed for frame tree rendering
-  // and for web platform APIs that expose screen and window info and events.
-  if (size_changed || screen_info_changed) {
+  // Notify the associated RenderWidgetHostImpl when screen info or size
+  // changes. That will synchronize visual properties needed for frame tree
+  // rendering and for web platform APIs that expose screen and window info and
+  // events.
+  if (renderer_size_changed || compositor_size_changed || screen_info_changed) {
     host()->NotifyScreenInfoChanged();
   }
 }
@@ -526,11 +552,11 @@ void RenderWidgetHostViewIOS::UpdateCALayerTree(
 void RenderWidgetHostViewIOS::OnOldViewDidNavigatePreCommit() {
   CHECK(browser_compositor_) << "Shouldn't be called during destruction!";
   browser_compositor_->DidNavigateMainFramePreCommit();
-  gesture_provider_.ResetDetection();
+  gesture_provider_->ResetDetection();
 }
 
 void RenderWidgetHostViewIOS::OnNewViewDidNavigatePostCommit() {
-  gesture_provider_.ResetDetection();
+  gesture_provider_->ResetDetection();
 }
 
 void RenderWidgetHostViewIOS::DidEnterBackForwardCache() {
@@ -605,6 +631,10 @@ bool RenderWidgetHostViewIOS::HasFallbackSurface() const {
   return browser_compositor_->GetDelegatedFrameHost()->HasFallbackSurface();
 }
 
+void RenderWidgetHostViewIOS::OptOutFrameEviction() {
+  browser_compositor_->GetDelegatedFrameHost()->OptOutFrameEviction();
+}
+
 bool RenderWidgetHostViewIOS::TransformPointToCoordSpaceForView(
     const gfx::PointF& point,
     RenderWidgetHostViewInput* target_view,
@@ -648,14 +678,18 @@ void RenderWidgetHostViewIOS::SetActive(bool active) {
 }
 
 bool RenderWidgetHostViewIOS::ShouldRouteEvents() const {
-  DCHECK(host());
-  return host()->delegate() && host()->delegate()->GetInputEventRouter();
+  if (!host()) {
+    return false;
+  }
+  return !!host()->GetInputEventRouter();
 }
 
 void RenderWidgetHostViewIOS::OnTouchEvent(blink::WebTouchEvent web_event) {
+  ScopedInputDispatchPin pin(this);
+  scoped_refptr<ui::FilteredGestureProvider> protector(gesture_provider_);
   ui::FilteredGestureProvider::TouchHandlingResult result =
-      gesture_provider_.OnTouchEvent(MotionEventWeb(web_event));
-  if (!result.succeeded) {
+      protector->OnTouchEvent(MotionEventWeb(web_event));
+  if (!result.succeeded || destroy_pending()) {
     return;
   }
 
@@ -663,8 +697,8 @@ void RenderWidgetHostViewIOS::OnTouchEvent(blink::WebTouchEvent web_event) {
   ui::LatencyInfo latency_info;
   latency_info.AddLatencyNumber(ui::INPUT_EVENT_LATENCY_UI_COMPONENT);
   if (ShouldRouteEvents()) {
-    host()->delegate()->GetInputEventRouter()->RouteTouchEvent(this, &web_event,
-                                                               latency_info);
+    host()->GetInputEventRouter()->RouteTouchEvent(this, &web_event,
+                                                   latency_info);
   } else {
     host()->GetRenderInputRouter()->ForwardTouchEventWithLatencyInfo(
         web_event, latency_info);
@@ -676,16 +710,18 @@ void RenderWidgetHostViewIOS::ProcessAckedTouchEvent(
     blink::mojom::InputEventResultState ack_result) {
   const bool event_consumed =
       ack_result == blink::mojom::InputEventResultState::kConsumed;
-  gesture_provider_.OnTouchEventAck(
+  ScopedInputDispatchPin pin(this);
+  scoped_refptr<ui::FilteredGestureProvider> protector(gesture_provider_);
+  protector->OnTouchEventAck(
       touch.event.unique_touch_event_id, event_consumed,
       input::InputEventResultStateIsSetBlocking(ack_result));
+  if (destroy_pending()) {
+    return;
+  }
   if (touch.event.touch_start_or_first_touch_move && event_consumed &&
       ShouldRouteEvents()) {
-    host()
-        ->delegate()
-        ->GetInputEventRouter()
-        ->OnHandledTouchStartOrFirstTouchMove(
-            touch.event.unique_touch_event_id);
+    host()->GetInputEventRouter()->OnHandledTouchStartOrFirstTouchMove(
+        touch.event.unique_touch_event_id);
   }
 }
 
@@ -704,9 +740,8 @@ void RenderWidgetHostViewIOS::OnGestureEvent(
 }
 
 bool RenderWidgetHostViewIOS::RequiresDoubleTapGestureEvents() const {
-  // Deliver taps immediately. Holding the first tap for double-tap-to-zoom
-  // adds latency and prevents sites that use two DOM clicks (for example file
-  // managers) from recognizing their own double-click action.
+  // тапи йдуть одразу, бо чекання подвійного тапу ламає dblclick на сайтах
+  // з двома DOM кліками (файлові менеджери)
   return false;
 }
 
@@ -718,17 +753,22 @@ void RenderWidgetHostViewIOS::SendGestureEvent(
 void RenderWidgetHostViewIOS::InjectTouchEvent(
     const blink::WebTouchEvent& event,
     const ui::LatencyInfo& latency_info) {
+  if (destroy_pending()) {
+    return;
+  }
+  ScopedInputDispatchPin pin(this);
+  scoped_refptr<ui::FilteredGestureProvider> protector(gesture_provider_);
   ui::FilteredGestureProvider::TouchHandlingResult result =
-      gesture_provider_.OnTouchEvent(MotionEventWeb(event));
-  if (!result.succeeded) {
+      protector->OnTouchEvent(MotionEventWeb(event));
+  if (!result.succeeded || destroy_pending()) {
     return;
   }
 
   if (ShouldRouteEvents()) {
     blink::WebTouchEvent touch_event(event);
-    host()->delegate()->GetInputEventRouter()->RouteTouchEvent(
-        this, &touch_event, latency_info);
-  } else {
+    host()->GetInputEventRouter()->RouteTouchEvent(this, &touch_event,
+                                                   latency_info);
+  } else if (host()) {
     host()->GetRenderInputRouter()->ForwardTouchEventWithLatencyInfo(
         event, latency_info);
   }
@@ -737,10 +777,14 @@ void RenderWidgetHostViewIOS::InjectTouchEvent(
 void RenderWidgetHostViewIOS::InjectGestureEvent(
     const blink::WebGestureEvent& event,
     const ui::LatencyInfo& latency_info) {
+  if (!host()) {
+    return;
+  }
+  ScopedInputDispatchPin pin(this);
   if (ShouldRouteEvents()) {
     blink::WebGestureEvent gesture_event(event);
-    host()->delegate()->GetInputEventRouter()->RouteGestureEvent(
-        this, &gesture_event, latency_info);
+    host()->GetInputEventRouter()->RouteGestureEvent(this, &gesture_event,
+                                                     latency_info);
   } else {
     host()->GetRenderInputRouter()->ForwardGestureEventWithLatencyInfo(
         event, latency_info);
@@ -750,10 +794,13 @@ void RenderWidgetHostViewIOS::InjectGestureEvent(
 void RenderWidgetHostViewIOS::InjectMouseEvent(
     const blink::WebMouseEvent& web_mouse,
     const ui::LatencyInfo& latency_info) {
+  if (!host()) {
+    return;
+  }
   if (ShouldRouteEvents()) {
     blink::WebMouseEvent mouse_event(web_mouse);
-    host()->delegate()->GetInputEventRouter()->RouteMouseEvent(
-        this, &mouse_event, latency_info);
+    host()->GetInputEventRouter()->RouteMouseEvent(this, &mouse_event,
+                                                   latency_info);
   } else {
     host()->ForwardMouseEventWithLatencyInfo(web_mouse, latency_info);
   }
@@ -762,9 +809,12 @@ void RenderWidgetHostViewIOS::InjectMouseEvent(
 void RenderWidgetHostViewIOS::InjectMouseWheelEvent(
     const blink::WebMouseWheelEvent& web_wheel,
     const ui::LatencyInfo& latency_info) {
+  if (!host()) {
+    return;
+  }
   if (ShouldRouteEvents()) {
     blink::WebMouseWheelEvent mouse_wheel_event(web_wheel);
-    host()->delegate()->GetInputEventRouter()->RouteMouseWheelEvent(
+    host()->GetInputEventRouter()->RouteMouseWheelEvent(
         this, &mouse_wheel_event, latency_info);
   } else {
     host()->ForwardWheelEventWithLatencyInfo(web_wheel, latency_info);
@@ -779,11 +829,8 @@ bool RenderWidgetHostViewIOS::CanResignFirstResponderForTesting() const {
   return IsTesting() && is_first_responder_;
 }
 
-// Blink only reports overscroll it did not consume, so a page that scrolls the
-// gesture itself never reaches here. `overscroll_behavior` carries the root
-// element's overscroll-behavior-y, which is how a site opts out of a browser
-// pull-to-refresh; honoring it is what keeps this from firing on sites that
-// implement their own.
+// Blink шле тільки не спожитий overscroll, overscroll_behavior це CSS
+// властивість кореня, нею сайт вимикає оновлення потягуванням
 void RenderWidgetHostViewIOS::DidOverscroll(
     const ui::DidOverscrollParams& params) {
   if (!BlinkOverscrollPull) {
@@ -791,7 +838,6 @@ void RenderWidgetHostViewIOS::DidOverscroll(
   }
   const bool allowed =
       params.overscroll_behavior.y == cc::OverscrollBehavior::Type::kAuto;
-  // Overscroll at the top of the document is reported as negative y.
   const float pull = -params.accumulated_overscroll.y();
   BlinkOverscrollPull(pull, allowed);
 }
@@ -841,8 +887,11 @@ RenderWidgetHostImpl* RenderWidgetHostViewIOS::GetActiveWidget() {
 }
 
 void RenderWidgetHostViewIOS::OnFirstResponderChanged() {
-  bool is_first_responder =
-      [ui_view_->view_ isFirstResponder] || (IsTesting() && is_getting_focus_);
+  if (destroy_pending()) {
+    return;
+  }
+  bool is_first_responder = [ui_view_->view_ isFirstResponder] ||
+                            (IsTesting() && is_getting_focus_);
 
   if (is_first_responder_ == is_first_responder) {
     return;
@@ -859,10 +908,6 @@ void RenderWidgetHostViewIOS::OnFirstResponderChanged() {
 float RenderWidgetHostViewIOS::GetFocusedInputBottomRatio() {
   TextInputManager* tim = GetTextInputManager();
   if (!tim || !tim->GetActiveWidget()) {
-    // No active text-input widget in the browser process — the same root cause
-    // as the missing TEXT_INPUT_BRIDGE focus logs (Blink hasn't reported a
-    // focused editable here). The site-scoped fallback covers this case.
-
     return -1.0f;
   }
   const CGFloat viewport_height = [ui_view_->view_ bounds].size.height;
@@ -870,19 +915,13 @@ float RenderWidgetHostViewIOS::GetFocusedInputBottomRatio() {
   if (viewport_height <= 1) {
     return -1.0f;
   }
-  // Caret/selection bounds are in widget DIPs relative to this view's origin —
-  // the actual focused location, NOT the bogus full-viewport editState bounds.
   const TextInputManager::SelectionRegion* region = tim->GetSelectionRegion();
   if (!region) {
     return -1.0f;
   }
-  const gfx::PointF caret_top = region->focus.edge_start();
   const gfx::PointF caret_bottom = region->focus.edge_end();
-  const gfx::Rect bbox = region->bounding_box;
 
   float focused_bottom = caret_bottom.y();
-  // The caret is a thin line, so it should never be a full-viewport rect; still
-  // reject obviously bogus metrics.
   if (!std::isfinite(focused_bottom) || focused_bottom <= 0.0f ||
       focused_bottom > viewport_height * 3.0f) {
     return -1.0f;
@@ -895,9 +934,6 @@ float RenderWidgetHostViewIOS::GetFocusedInputBottomRatio() {
 
 namespace {
 
-// Resolves a focused editable through shadow roots and same-origin frames,
-// widens it to a bounded input container, and returns its viewport-relative
-// bottom edge. Runs in an isolated world and returns -1 when unavailable.
 const char16_t kFocusedInputMetricsJS[] = uR"JS((function() {
   try {
     var vv = window.visualViewport;
@@ -1006,7 +1042,6 @@ void RenderWidgetHostViewIOS::OnUpdateTextInputStateCalled(
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-// Both functions return before BrowserEngineKit access on pre-17.4 systems.
 void RenderWidgetHostViewIOS::OnTextSelectionChanged(
     TextInputManager* text_input_manager,
     RenderWidgetHostViewBase* updated_view) {
@@ -1015,7 +1050,8 @@ void RenderWidgetHostViewIOS::OnTextSelectionChanged(
     [ui_view_->view_ selectionDidChange];
     return;
   }
-  DCHECK_EQ(GetTextInputManager(), text_input_manager);
+  CHECK_EQ(GetTextInputManager(), text_input_manager,
+           base::NotFatalUntil::M158);
   const TextInputManager::TextSelection* selection =
       text_input_manager->GetTextSelection(updated_view);
   if (selection && selection->selected_text().length()) {
@@ -1040,6 +1076,8 @@ void RenderWidgetHostViewIOS::OnSelectionBoundsChanged(
   }
   [[ui_view_->view_ textInteraction]
           .textSelectionDisplayInteraction setNeedsSelectionUpdate];
+  // overlay каретки Blinker наш на всіх версіях, нові межі потрібні і йому
+  [ui_view_->view_ refreshSelectionOverlay];
 #endif
 }
 #pragma clang diagnostic pop
@@ -1074,13 +1112,11 @@ void RenderWidgetHostViewIOS::GestureEventAck(
       break;
     case blink::WebInputEvent::Type::kGestureScrollEnd: {
       // Make sure our cached view bounds gets updated.
-      if (!IsTesting()) {
-        view_bounds_ = gfx::Rect([ui_view_->view_ bounds]);
-      }
+      is_scrolling_ = false;
+      UpdateViewBounds(gfx::Rect([ui_view_->view_ bounds]));
       if (host()->delegate()) {
         host()->delegate()->SetTopControlsGestureScrollInProgress(false);
       }
-      is_scrolling_ = false;
       CGPoint targetOffset = [scrollView contentOffset];
       [[scrollView delegate] scrollViewWillEndDragging:scrollView
                                           withVelocity:CGPoint()
@@ -1105,23 +1141,30 @@ void RenderWidgetHostViewIOS::ChildDidAckGestureEvent(
 }
 
 void RenderWidgetHostViewIOS::OnUnconfirmedTapConvertedToTap() {
-  gesture_provider_.OnUnconfirmedTapConvertedToTap();
+  gesture_provider_->OnUnconfirmedTapConvertedToTap();
 }
 
 void RenderWidgetHostViewIOS::UpdateFrameBounds() {
   const gfx::PointF scrollOffset =
       last_root_scroll_offset_.value_or(gfx::PointF());
-  const CGRect parentBounds = [[ui_view_->view_ superview] bounds];
+  UIScrollView* scrollView = (UIScrollView*)[ui_view_->view_ superview];
+  const CGRect parentBounds = [scrollView bounds];
+  const UIEdgeInsets parentInset = [scrollView contentInset];
 
-  CGRect frameBounds;
-  frameBounds.origin = scrollOffset.ToCGPoint();
-  frameBounds.size = parentBounds.size;
+  CGRect frameBounds = UIEdgeInsetsInsetRect(parentBounds, parentInset);
+  frameBounds.origin = CGPointMake(scrollOffset.x() + parentInset.left,
+                                   scrollOffset.y() + parentInset.top);
 
-  // If we are scrolling we don't resize the WebView immediately.
-  if (!is_scrolling_ && !IsTesting()) {
-    view_bounds_ = gfx::Rect(frameBounds);
-  }
+  UpdateViewBounds(gfx::Rect(frameBounds));
   [ui_view_->view_ setFrame:frameBounds];
+}
+
+bool RenderWidgetHostViewIOS::UpdateViewBounds(const gfx::Rect& bounds) {
+  if (is_scrolling_ || use_fixed_size_for_testing_ || view_bounds_ == bounds) {
+    return false;
+  }
+  view_bounds_ = bounds;
+  return true;
 }
 
 void RenderWidgetHostViewIOS::ApplyRootScrollOffsetChanged(
@@ -1158,11 +1201,26 @@ void RenderWidgetHostViewIOS::OnRootScrollOffsetChanged(
 void RenderWidgetHostViewIOS::ContentInsetChanged() {
   if (last_root_scroll_offset_) {
     ApplyRootScrollOffsetChanged(*last_root_scroll_offset_, /*force=*/true);
+  } else {
+    UpdateFrameBounds();
   }
   if (!is_scrolling_) {
     host()->SynchronizeVisualProperties();
   }
 }
+
+#if !BUILDFLAG(IS_IOS_TVOS)
+void RenderWidgetHostViewIOS::OnKeyboardVisibilityChanged() {
+  host()->SynchronizeVisualProperties();
+
+  if ([ui_view_->view_ keyboardHeight] > 0) {
+    auto* input_handler = GetFrameWidgetInputHandlerForFocusedWidget();
+    if (input_handler) {
+      input_handler->ScrollFocusedEditableNodeIntoView();
+    }
+  }
+}
+#endif  // !BUILDFLAG(IS_IOS_TVOS)
 
 void RenderWidgetHostViewIOS::ExtendSelectionAndDelete(int32_t before,
                                                        int32_t after) {
@@ -1204,6 +1262,18 @@ void RenderWidgetHostViewIOS::AdvanceFocusForIME(
   }
   rfh->current_frame_host()->GetAssociatedLocalFrame()->AdvanceFocusForIME(
       focus_type);
+}
+
+void RenderWidgetHostViewIOS::ClearFocusedElement() {
+  auto* host = GetFocusedWidget();
+  if (!host) {
+    return;
+  }
+  auto* rfh = host->frame_tree()->GetFocusedFrame();
+  if (!rfh) {
+    return;
+  }
+  rfh->current_frame_host()->ClearFocusedElement();
 }
 
 void RenderWidgetHostViewIOS::SendKeyEvent(
@@ -1269,9 +1339,10 @@ void RenderWidgetHostViewIOS::RectForEditFieldChars(
 }
 
 gfx::Size RenderWidgetHostViewIOS::GetCompositorViewportPixelSize() {
-  return gfx::ScaleToCeiledSize(
-      IsTesting() ? GetRequestedRendererSize() : GetScreenInfo().rect.size(),
-      GetDeviceScaleFactor());
+  return gfx::ScaleToCeiledSize(use_fixed_size_for_testing_
+                                    ? GetRequestedRendererSize()
+                                    : GetScreenInfo().rect.size(),
+                                GetDeviceScaleFactor());
 }
 
 void RenderWidgetHostViewIOS::ComputeDisplayFeature() {

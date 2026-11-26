@@ -1,0 +1,523 @@
+// Copyright 2025 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include "content/browser/renderer_host/render_widget_host_view_ios_uiview.h"
+
+#include "base/apple/foundation_util.h"
+#include "content/browser/renderer_host/text_input_manager.h"
+#include "testing/platform_test.h"
+#include "third_party/blink/public/common/input/web_keyboard_event.h"
+#include "ui/base/device_form_factor.h"
+#include "ui/base/ime/mojom/text_input_state.mojom.h"
+#include "ui/base/ime/text_input_flags.h"
+
+@interface RenderWidgetUIView (Testing)
+- (BOOL)shouldInsertCharacter:(const blink::WebKeyboardEvent&)webKeyboardEvent;
+- (BOOL)isEditable;
+- (std::string)moveSelectionCommand:(UITextLayoutDirection)direction;
+- (std::string)extendSelectionCommand:(UITextLayoutDirection)direction;
+- (std::vector<std::string>)
+    moveSelectionCommands:(UITextStorageDirection)direction
+            byGranularity:(UITextGranularity)granularity;
+- (std::vector<std::string>)
+    extendSelectionCommands:(UITextStorageDirection)direction
+              byGranularity:(UITextGranularity)granularity;
+- (std::vector<std::string>)
+    deleteSelectionCommands:(UITextStorageDirection)direction
+              toGranularity:(UITextGranularity)granularity;
+@end
+
+@interface SelectionTestUIView : RenderWidgetUIView
+@property(nonatomic, assign)
+    const content::TextInputManager::SelectionRegion* testRegion;
+@end
+
+@implementation SelectionTestUIView
+- (const content::TextInputManager::SelectionRegion*)selectionRegion {
+  return self.testRegion;
+}
+@end
+
+namespace content {
+
+class RenderWidgetHostViewIOSUIViewTest : public PlatformTest {
+ public:
+  void SetUp() override {
+    uiview_ = [[RenderWidgetUIView alloc] initWithWidget:nil];
+  }
+
+ protected:
+  RenderWidgetUIView* uiview_;
+};
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, SelectionPreservesLogicalEndpoints) {
+  SelectionTestUIView* view = [[SelectionTestUIView alloc] initWithWidget:nil];
+  TextInputManager::SelectionRegion region;
+  region.anchor.SetEdge(gfx::PointF(200, 20), gfx::PointF(200, 40));
+  region.focus.SetEdge(gfx::PointF(30, 20), gfx::PointF(30, 40));
+  region.anchor.set_type(gfx::SelectionBound::RIGHT);
+  region.focus.set_type(gfx::SelectionBound::LEFT);
+  view.testRegion = &region;
+
+  for (bool anchor_first : {true, false}) {
+    region.is_anchor_first = anchor_first;
+    UITextRange* range = view.selectedTextRange;
+    ASSERT_NE(nil, range);
+    EXPECT_FALSE(range.empty);
+    EXPECT_EQ(anchor_first ? 200 : 30,
+              CGRectGetMinX([view caretRectForPosition:range.start]));
+    EXPECT_EQ(anchor_first ? 30 : 200,
+              CGRectGetMinX([view caretRectForPosition:range.end]));
+  }
+  view.testRegion = nullptr;
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, SelectionUsesEachEndpointsDirection) {
+  SelectionTestUIView* view = [[SelectionTestUIView alloc] initWithWidget:nil];
+  TextInputManager::SelectionRegion region;
+  region.anchor.SetEdge(gfx::PointF(200, 20), gfx::PointF(200, 40));
+  region.focus.SetEdge(gfx::PointF(30, 20), gfx::PointF(30, 40));
+  region.anchor.set_type(gfx::SelectionBound::RIGHT);
+  region.focus.set_type(gfx::SelectionBound::LEFT);
+  region.anchor_direction = base::i18n::RIGHT_TO_LEFT;
+  region.focus_direction = base::i18n::LEFT_TO_RIGHT;
+  view.testRegion = &region;
+
+  for (bool anchor_first : {true, false}) {
+    region.is_anchor_first = anchor_first;
+    NSArray<UITextSelectionRect*>* rects =
+        [view selectionRectsForRange:view.selectedTextRange];
+    ASSERT_EQ(2u, rects.count);
+    EXPECT_TRUE(rects[0].containsStart);
+    EXPECT_FALSE(rects[0].containsEnd);
+    EXPECT_FALSE(rects[1].containsStart);
+    EXPECT_TRUE(rects[1].containsEnd);
+    EXPECT_EQ(anchor_first ? NSWritingDirectionRightToLeft
+                           : NSWritingDirectionLeftToRight,
+              rects[0].writingDirection);
+    EXPECT_EQ(anchor_first ? NSWritingDirectionLeftToRight
+                           : NSWritingDirectionRightToLeft,
+              rects[1].writingDirection);
+    EXPECT_FALSE(rects[0].isVertical);
+    EXPECT_FALSE(rects[1].isVertical);
+  }
+  view.testRegion = nullptr;
+}
+
+blink::WebKeyboardEvent CreateKeyboardEvent(char16_t character,
+                                            int modifiers = 0) {
+  blink::WebKeyboardEvent event;
+  event.text[0] = character;
+  event.text[1] = 0;  // Null-terminate the string
+  event.SetModifiers(modifiers);
+  return event;
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, ShouldInsertCharacter) {
+  struct {
+    std::string category;
+    std::vector<char16_t> characters;
+    bool expected_result;
+  } test_cases[] = {
+      {"Basic Latin", {u'a', u'Z', u'0', u'9', u'@', u' '}, true},
+      {"Control Characters", {0x00, 0x01, 0x1F}, false},
+      {"Latin-1 Supplement", {0x00A1, 0x00FF}, true},  // ¡, ÿ
+      {"Currency Symbols", {0x20AC, 0x00A5}, true},    // €, ¥
+      {"Mathematical Symbols", {0x2200, 0x22FF}, true},
+  };
+
+  for (const auto& test_case : test_cases) {
+    for (char16_t c : test_case.characters) {
+      EXPECT_EQ([uiview_ shouldInsertCharacter:CreateKeyboardEvent(c)],
+                test_case.expected_result);
+    }
+  }
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, ShouldInsertMultiCharacterInput) {
+  blink::WebKeyboardEvent emoji_event;
+
+  // Set up a multi-character emoji sequence
+  const std::vector<char16_t> emoji = {0xD83D, 0xDE00,
+                                       0};  // 😀 (surrogate pair)
+  int i = 0;
+  for (char16_t e : emoji) {
+    if (e != 0) {
+      emoji_event.text[i++] = e;
+    }
+  }
+
+  EXPECT_TRUE([uiview_ shouldInsertCharacter:emoji_event]);
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, ShouldNotInsertWithControlModifiers) {
+  // Control key should prevent character insertion for ASCII characters
+  EXPECT_FALSE([uiview_
+      shouldInsertCharacter:CreateKeyboardEvent(
+                                u'a', blink::WebInputEvent::kControlKey)]);
+
+  // Meta key should also prevent character insertion for ASCII characters
+  EXPECT_FALSE([uiview_
+      shouldInsertCharacter:CreateKeyboardEvent(
+                                u'b', blink::WebInputEvent::kMetaKey)]);
+
+  // Other modifiers should not prevent insertion
+  EXPECT_TRUE([uiview_
+      shouldInsertCharacter:CreateKeyboardEvent(
+                                u'c', blink::WebInputEvent::kShiftKey)]);
+  EXPECT_TRUE(
+      [uiview_ shouldInsertCharacter:CreateKeyboardEvent(
+                                         u'd', blink::WebInputEvent::kAltKey)]);
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, MoveSelectionCommand) {
+  // Create a map of directions to expected commands
+  struct {
+    UITextLayoutDirection direction;
+    std::string expected_command;
+  } test_cases[] = {
+      {UITextLayoutDirectionLeft, "moveLeft"},
+      {UITextLayoutDirectionRight, "moveRight"},
+      {UITextLayoutDirectionUp, "moveUp"},
+      {UITextLayoutDirectionDown, "moveDown"},
+  };
+
+  // Verify each case
+  for (const auto& test_case : test_cases) {
+    std::string command = [uiview_ moveSelectionCommand:test_case.direction];
+    EXPECT_EQ(command, test_case.expected_command);
+  }
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, ExtendSelectionCommand) {
+  // Create a map of directions to expected commands
+  struct {
+    UITextLayoutDirection direction;
+    std::string expected_command;
+  } test_cases[] = {
+      {UITextLayoutDirectionLeft, "moveLeftAndModifySelection"},
+      {UITextLayoutDirectionRight, "moveRightAndModifySelection"},
+      {UITextLayoutDirectionUp, "moveUpAndModifySelection"},
+      {UITextLayoutDirectionDown, "moveDownAndModifySelection"},
+  };
+
+  // Verify each case
+  for (const auto& test_case : test_cases) {
+    std::string command = [uiview_ extendSelectionCommand:test_case.direction];
+    EXPECT_EQ(command, test_case.expected_command);
+  }
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, MoveSelectionCommands) {
+  // Define all test cases
+  struct {
+    UITextStorageDirection direction;
+    UITextGranularity granularity;
+    std::vector<std::string> expected_commands;
+  } test_cases[] = {
+      // Character granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityCharacter,
+       {"moveForward"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityCharacter,
+       {"moveBackward"}},
+
+      // Word granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityWord,
+       {"moveWordForward"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityWord,
+       {"moveWordBackward"}},
+
+      // Sentence granularity
+      {UITextStorageDirectionForward,
+       UITextGranularitySentence,
+       {"moveToEndOfSentence"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularitySentence,
+       {"moveToBeginningOfSentence"}},
+
+      // Paragraph granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityParagraph,
+       {"moveForward", "moveToEndOfParagraph"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityParagraph,
+       {"moveBackward", "moveToBeginningOfParagraph"}},
+
+      // Line granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityLine,
+       {"moveToEndOfLine"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityLine,
+       {"moveToBeginningOfLine"}},
+
+      // Document granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityDocument,
+       {"moveToEndOfDocument"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityDocument,
+       {"moveToBeginningOfDocument"}},
+  };
+
+  // Verify each case
+  for (const auto& test_case : test_cases) {
+    std::vector<std::string> commands =
+        [uiview_ moveSelectionCommands:test_case.direction
+                         byGranularity:test_case.granularity];
+
+    ASSERT_EQ(commands.size(), test_case.expected_commands.size());
+
+    for (size_t i = 0; i < commands.size(); i++) {
+      EXPECT_EQ(commands[i], test_case.expected_commands[i]);
+    }
+  }
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, ExtendSelectionCommands) {
+  // Define all test cases
+  struct {
+    UITextStorageDirection direction;
+    UITextGranularity granularity;
+    std::vector<std::string> expected_commands;
+  } test_cases[] = {
+      // Character granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityCharacter,
+       {"moveBackwardAndModifySelection"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityCharacter,
+       {"moveForwardAndModifySelection"}},
+
+      // Word granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityWord,
+       {"moveWordForwardAndModifySelection"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityWord,
+       {"moveWordBackwardAndModifySelection"}},
+
+      // Sentence granularity
+      {UITextStorageDirectionForward,
+       UITextGranularitySentence,
+       {"moveToEndOfSentenceAndModifySelection"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularitySentence,
+       {"moveToBeginningOfSentenceAndModifySelection"}},
+
+      // Paragraph granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityParagraph,
+       {"moveForwardAndModifySelection",
+        "moveToEndOfParagraphAndModifySelection"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityParagraph,
+       {"moveBackwardAndModifySelection",
+        "moveToBeginningOfParagraphAndModifySelection"}},
+
+      // Line granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityLine,
+       {"moveToEndOfLineAndModifySelection"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityLine,
+       {"moveToBeginningOfLineAndModifySelection"}},
+
+      // Document granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityDocument,
+       {"moveToEndOfDocumentAndModifySelection"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityDocument,
+       {"moveToBeginningOfDocumentAndModifySelection"}},
+  };
+
+  // Verify each case
+  for (const auto& test_case : test_cases) {
+    std::vector<std::string> commands =
+        [uiview_ extendSelectionCommands:test_case.direction
+                           byGranularity:test_case.granularity];
+
+    ASSERT_EQ(commands.size(), test_case.expected_commands.size());
+
+    for (size_t i = 0; i < commands.size(); i++) {
+      EXPECT_EQ(commands[i], test_case.expected_commands[i]);
+    }
+  }
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest, DeleteSelectionCommands) {
+  // Define all test cases
+  struct {
+    UITextStorageDirection direction;
+    UITextGranularity granularity;
+    std::vector<std::string> expected_commands;
+  } test_cases[] = {
+      // Character granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityCharacter,
+       {"deleteForward"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityCharacter,
+       {"deleteBackward"}},
+
+      // Word granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityWord,
+       {"deleteWordForward"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityWord,
+       {"deleteWordBackward"}},
+
+      // Sentence granularity
+      {UITextStorageDirectionForward,
+       UITextGranularitySentence,
+       {"moveToEndOfSentenceAndModifySelection", "deleteBackward"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularitySentence,
+       {"moveToBeginningOfSentenceAndModifySelection", "deleteBackward"}},
+
+      // Paragraph granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityParagraph,
+       {"deleteToEndOfParagraph"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityParagraph,
+       {"deleteToBeginningOfParagraph"}},
+
+      // Line granularity
+      {UITextStorageDirectionForward,
+       UITextGranularityLine,
+       {"deleteToEndOfLine"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityLine,
+       {"deleteToBeginningOfLine"}},
+
+      // Document granularity (default case)
+      {UITextStorageDirectionForward,
+       UITextGranularityDocument,
+       {"moveToEndOfDocumentAndModifySelection", "deleteBackward"}},
+      {UITextStorageDirectionBackward,
+       UITextGranularityDocument,
+       {"moveToBeginningOfDocumentAndModifySelection", "deleteBackward"}},
+  };
+
+  // Verify each case
+  for (const auto& test_case : test_cases) {
+    std::vector<std::string> commands =
+        [uiview_ deleteSelectionCommands:test_case.direction
+                           toGranularity:test_case.granularity];
+
+    ASSERT_EQ(commands.size(), test_case.expected_commands.size());
+
+    for (size_t i = 0; i < commands.size(); i++) {
+      EXPECT_EQ(commands[i], test_case.expected_commands[i]);
+    }
+  }
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest,
+       InputAccessoryButtonsFollowFocusableFlags) {
+  UIBarButtonItem* previousButton;
+  UIBarButtonItem* nextButton;
+
+  if (ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET) {
+    // Set editable state so updateInputAssistantItem populates the groups.
+    ui::mojom::TextInputState editable_state;
+    editable_state.type = ui::TextInputType::TEXT_INPUT_TYPE_TEXT;
+    editable_state.mode = ui::TextInputMode::TEXT_INPUT_MODE_TEXT;
+    [uiview_ onUpdateTextInputState:editable_state withBounds:CGRectZero];
+
+    NSArray<UIBarButtonItemGroup*>* trailingGroups =
+        uiview_.inputAssistantItem.trailingBarButtonGroups;
+    ASSERT_EQ(trailingGroups.count, 1u);
+    ASSERT_GE(trailingGroups[0].barButtonItems.count, 2u);
+    previousButton = trailingGroups[0].barButtonItems[0];
+    nextButton = trailingGroups[0].barButtonItems[1];
+  } else {
+    // Set editable state so inputAccessoryView returns the toolbar.
+    ui::mojom::TextInputState editable_state;
+    editable_state.type = ui::TextInputType::TEXT_INPUT_TYPE_TEXT;
+    editable_state.mode = ui::TextInputMode::TEXT_INPUT_MODE_TEXT;
+    [uiview_ onUpdateTextInputState:editable_state withBounds:CGRectZero];
+
+    UIView* inputAccessoryView = [uiview_ inputAccessoryView];
+    ASSERT_NE(inputAccessoryView, nil);
+
+    UIToolbar* toolbar = base::apple::ObjCCast<UIToolbar>(
+        inputAccessoryView.subviews.firstObject);
+    ASSERT_NE(toolbar, nil);
+    ASSERT_GE(toolbar.items.count, 2u);
+    EXPECT_EQ(
+        CGRectGetHeight(inputAccessoryView.frame),
+        CGRectGetHeight(toolbar.frame) + kInputAccessoryToolbarBottomMargin);
+    previousButton = toolbar.items[0];
+    nextButton = toolbar.items[1];
+  }
+
+  ui::mojom::TextInputState state;
+  state.type = ui::TextInputType::TEXT_INPUT_TYPE_TEXT;
+  state.mode = ui::TextInputMode::TEXT_INPUT_MODE_TEXT;
+
+  state.flags = 0;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_FALSE(previousButton.enabled);
+  EXPECT_FALSE(nextButton.enabled);
+
+  state.flags = ui::TEXT_INPUT_FLAG_HAVE_PREVIOUS_FOCUSABLE_ELEMENT;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_TRUE(previousButton.enabled);
+  EXPECT_FALSE(nextButton.enabled);
+
+  state.flags = ui::TEXT_INPUT_FLAG_HAVE_NEXT_FOCUSABLE_ELEMENT;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_FALSE(previousButton.enabled);
+  EXPECT_TRUE(nextButton.enabled);
+
+  state.flags = ui::TEXT_INPUT_FLAG_HAVE_PREVIOUS_FOCUSABLE_ELEMENT |
+                ui::TEXT_INPUT_FLAG_HAVE_NEXT_FOCUSABLE_ELEMENT;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_TRUE(previousButton.enabled);
+  EXPECT_TRUE(nextButton.enabled);
+}
+
+TEST_F(RenderWidgetHostViewIOSUIViewTest,
+       OnUpdateTextInputStateSetsEditableBeforeKeyboard) {
+  EXPECT_FALSE([uiview_ isEditable]);
+
+  // Editable text input type sets isEditable to YES.
+  ui::mojom::TextInputState state;
+  state.type = ui::TextInputType::TEXT_INPUT_TYPE_TEXT;
+  state.mode = ui::TextInputMode::TEXT_INPUT_MODE_TEXT;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_TRUE([uiview_ isEditable]);
+
+  // TEXT_INPUT_TYPE_NONE sets isEditable to NO.
+  state.type = ui::TextInputType::TEXT_INPUT_TYPE_NONE;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_FALSE([uiview_ isEditable]);
+
+  // TEXT_INPUT_MODE_NONE sets isEditable to NO.
+  state.type = ui::TextInputType::TEXT_INPUT_TYPE_TEXT;
+  state.mode = ui::TextInputMode::TEXT_INPUT_MODE_NONE;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_FALSE([uiview_ isEditable]);
+
+  // TEXT_AREA type sets isEditable to YES.
+  state.type = ui::TextInputType::TEXT_INPUT_TYPE_TEXT_AREA;
+  state.mode = ui::TextInputMode::TEXT_INPUT_MODE_TEXT;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_TRUE([uiview_ isEditable]);
+
+  // always_hide_ime does not affect isEditable (only keyboard visibility).
+  state.always_hide_ime = true;
+  [uiview_ onUpdateTextInputState:state withBounds:CGRectZero];
+  EXPECT_TRUE([uiview_ isEditable]);
+}
+
+}  // namespace content
