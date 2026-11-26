@@ -6,22 +6,20 @@
 
 #include <algorithm>
 #include <memory>
+#include <ranges>
 #include <utility>
 
-#include "build/build_config.h"
-#include "base/containers/adapters.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/memory/raw_span.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "build/build_config.h"
 #include "media/base/media_log.h"
 #include "net/base/net_errors.h"
 #include "third_party/blink/renderer/platform/media/buffered_data_source_host_impl.h"
 #include "third_party/blink/renderer/platform/media/multi_buffer_reader.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
-#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
-#include "third_party/blink/renderer/platform/wtf/cross_thread_copier_base.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 #include "url/gurl.h"
@@ -128,7 +126,7 @@ MultiBufferDataSource::MultiBufferDataSource(
   DCHECK(host_);
   DCHECK(downloading_cb_);
   DCHECK(render_task_runner_->BelongsToCurrentThread());
-  DCHECK(url_data_);
+  CHECK(url_data_);
   url_data_->Use();
   url_data_->OnRedirect(
       blink::BindOnce(&MultiBufferDataSource::OnRedirected, weak_ptr_));
@@ -154,18 +152,6 @@ void MultiBufferDataSource::SetReader(
   reader_ = std::move(reader);
 }
 
-void MultiBufferDataSource::CreateResourceLoader(int64_t first_byte_position,
-                                                 int64_t last_byte_position) {
-  DCHECK(render_task_runner_->BelongsToCurrentThread());
-
-  SetReader(std::make_unique<MultiBufferReader>(
-      url_data_->multibuffer(), first_byte_position, last_byte_position,
-      is_client_audio_element_,
-      blink::BindRepeating(&MultiBufferDataSource::ProgressCallback, weak_ptr_),
-      render_task_runner_));
-  UpdateBufferSizes();
-}
-
 void MultiBufferDataSource::CreateResourceLoader_Locked(
     int64_t first_byte_position,
     int64_t last_byte_position) {
@@ -187,7 +173,8 @@ void MultiBufferDataSource::Initialize(InitializeCB init_cb) {
 
   init_cb_ = std::move(init_cb);
 
-  CreateResourceLoader(0, kPositionNotSpecified);
+  base::AutoLock auto_lock(lock_);
+  CreateResourceLoader_Locked(0, kPositionNotSpecified);
 
   // We're not allowed to call Wait() if data is already available.
   if (reader_->Available()) {
@@ -213,7 +200,7 @@ void MultiBufferDataSource::OnRedirected(
     const scoped_refptr<UrlData>& new_destination) {
   did_redirect_ = true;
 
-  if (!new_destination || !url_data_) {
+  if (!new_destination) {
     // A failure occurred.
     failed_ = true;
     if (init_cb_) {
@@ -228,36 +215,35 @@ void MultiBufferDataSource::OnRedirected(
     StopLoader();
     return;
   }
-  if (!SecurityOrigin::AreSameOrigin(url_data_->url(),
-                                     new_destination->url())) {
-    single_origin_ = false;
-  }
   SetReader(nullptr);
   url_data_ = std::move(new_destination);
 
   url_data_->OnRedirect(
       blink::BindOnce(&MultiBufferDataSource::OnRedirected, weak_ptr_));
 
-  if (init_cb_) {
-    CreateResourceLoader(0, kPositionNotSpecified);
-    if (reader_->Available()) {
-      PostCrossThreadTask(
-          *render_task_runner_, FROM_HERE,
-          CrossThreadBindOnce(&MultiBufferDataSource::StartCallback,
-                              weak_ptr_));
-    } else {
-      reader_->Wait(
-          1, blink::BindOnce(&MultiBufferDataSource::StartCallback, weak_ptr_));
-    }
-  } else if (read_op_) {
-    CreateResourceLoader(read_op_->position(), kPositionNotSpecified);
-    if (reader_->Available()) {
-      PostCrossThreadTask(
-          *render_task_runner_, FROM_HERE,
-          CrossThreadBindOnce(&MultiBufferDataSource::ReadTask, weak_ptr_));
-    } else {
-      reader_->Wait(
-          1, blink::BindOnce(&MultiBufferDataSource::ReadTask, weak_ptr_));
+  {
+    base::AutoLock auto_lock(lock_);
+    if (init_cb_) {
+      CreateResourceLoader_Locked(0, kPositionNotSpecified);
+      if (reader_->Available()) {
+        PostCrossThreadTask(
+            *render_task_runner_, FROM_HERE,
+            CrossThreadBindOnce(&MultiBufferDataSource::StartCallback,
+                                weak_ptr_));
+      } else {
+        reader_->Wait(1, blink::BindOnce(&MultiBufferDataSource::StartCallback,
+                                         weak_ptr_));
+      }
+    } else if (read_op_) {
+      CreateResourceLoader_Locked(read_op_->position(), kPositionNotSpecified);
+      if (reader_->Available()) {
+        PostCrossThreadTask(
+            *render_task_runner_, FROM_HERE,
+            CrossThreadBindOnce(&MultiBufferDataSource::ReadTask, weak_ptr_));
+      } else {
+        reader_->Wait(
+            1, blink::BindOnce(&MultiBufferDataSource::ReadTask, weak_ptr_));
+      }
     }
   }
 
@@ -288,12 +274,6 @@ bool MultiBufferDataSource::PassedTimingAllowOriginCheck() {
 }
 
 bool MultiBufferDataSource::WouldTaintOrigin() const {
-  // When the resource is redirected to another origin we think of it as
-  // tainted. This is actually not specified, and is under discussion.
-  // See https://github.com/whatwg/fetch/issues/737.
-  if (!single_origin_ && cors_mode() == UrlData::CORS_UNSPECIFIED) {
-    return true;
-  }
   return url_data_->is_cors_cross_origin();
 }
 
@@ -334,13 +314,6 @@ void MultiBufferDataSource::Stop() {
   {
     base::AutoLock auto_lock(lock_);
     StopInternal_Locked();
-
-    // Cleanup resources immediately if we're already on the right thread.
-    if (render_task_runner_->BelongsToCurrentThread()) {
-      reader_.reset();
-      url_data_.reset();
-      return;
-    }
   }
 
   PostCrossThreadTask(*render_task_runner_, FROM_HERE,
@@ -394,6 +367,13 @@ int64_t MultiBufferDataSource::GetMemoryUsage() {
 
 GURL MultiBufferDataSource::GetUrlAfterRedirects() const {
   return GURL(url_data_->url());
+}
+
+GURL MultiBufferDataSource::GetUrlDataOrigin() const {
+  if (url_data_->data_origin().has_value()) {
+    return GURL(*url_data_->data_origin());
+  }
+  return GetUrlAfterRedirects();
 }
 
 void MultiBufferDataSource::Read(int64_t position,
@@ -538,7 +518,7 @@ void MultiBufferDataSource::SeekTask_Locked() {
     // Iterate backwards, because if two positions have the same
     // amount of buffered data, we probably want to prefer the latest
     // one in the array.
-    for (const auto& new_pos : base::Reversed(seek_positions_)) {
+    for (const auto& new_pos : std::views::reverse(seek_positions_)) {
       int64_t available_at_new_pos = reader_->AvailableAt(new_pos);
 
       if (total_bytes_ != kPositionNotSpecified) {
@@ -581,6 +561,12 @@ void MultiBufferDataSource::StopLoader() {
 
 void MultiBufferDataSource::SetBitrateTask(int bitrate) {
   DCHECK(render_task_runner_->BelongsToCurrentThread());
+  {
+    base::AutoLock auto_lock(lock_);
+    if (stop_signal_received_) {
+      return;
+    }
+  }
 
   bitrate_ = bitrate;
   UpdateBufferSizes();
@@ -629,10 +615,6 @@ void MultiBufferDataSource::StartCallback() {
         host_->AddBufferedByteRange(0, total_bytes_);
     }
 
-    // Progress callback might be called after the start callback,
-    // make sure that we update single_origin_ now.
-    media_log_->SetProperty<media::MediaLogProperty::kIsSingleOrigin>(
-        single_origin_);
     media_log_->SetProperty<media::MediaLogProperty::kIsRangeHeaderSupported>(
         url_data_->range_supported());
 
@@ -776,16 +758,11 @@ void MultiBufferDataSource::UpdateBufferSizes() {
   }
 
 #if BUILDFLAG(IS_IOS)
-  // Blinker Fluid iOS OOM guard: on a memory-constrained, single-process,
-  // jitless device the pinned media regions (which cannot be evicted by the
-  // GlobalLRU or by memory pressure — MultiBuffer ignores pressure) are a
-  // direct path to a jetsam SIGKILL. A single large <video>/<audio> could
-  // otherwise pin hundreds of MB (the fully-cached / small-file branch above
-  // pins length*2). Clamp the pinned and advisory buffer sizes to hard iOS
-  // ceilings; the cost is occasional re-fetching, never incorrect playback.
-  constexpr int64_t kIOSMaxBuffer = 24 << 20;    // 24 Mb advisory cache
-  constexpr int64_t kIOSMaxPinForward = 24 << 20;   // 24 Mb pinned ahead
-  constexpr int64_t kIOSMaxPinBackward = 8 << 20;   // 8 Mb pinned behind
+  // Закріплені регіони не витісняє ні LRU ні тиск пам'яті, на iOS це шлях
+  // до SIGKILL від jetsam. Тому ліміт на буфери
+  constexpr int64_t kIOSMaxBuffer = 24 << 20;
+  constexpr int64_t kIOSMaxPinForward = 24 << 20;
+  constexpr int64_t kIOSMaxPinBackward = 8 << 20;
   buffer_size = std::min(buffer_size, kIOSMaxBuffer);
   pin_forward = std::min(pin_forward, kIOSMaxPinForward);
   pin_backward = std::min(pin_backward, kIOSMaxPinBackward);
@@ -821,9 +798,12 @@ MultiBufferDataSource::Factory::Factory(
       base::DoNothing(), tick_clock);
 }
 
-void MultiBufferDataSource::Factory::Create(const GURL& uri,
-                                            DataSource::CacheMode cache_mode,
-                                            DataSourceCb cb) {
+void MultiBufferDataSource::Factory::Create(
+    const GURL& uri,
+    media::DataSource::CacheMode cache_mode,
+    media::DataSource::EncodingMode encoding_mode,
+    base::OnceCallback<void(std::unique_ptr<media::CrossOriginDataSource>)>
+        cb) {
   DCHECK(main_task_runner_->BelongsToCurrentThread());
   auto download_cb =
 #if DCHECK_IS_ON()
@@ -837,13 +817,13 @@ void MultiBufferDataSource::Factory::Create(const GURL& uri,
 #endif
 
   get_url_data_.Run(
-      uri, cache_mode,
+      uri, cache_mode, encoding_mode,
       blink::BindOnce(&Factory::OnUrlData, weak_factory_.GetWeakPtr(),
                       std::move(cb), std::move(download_cb)));
 }
 
 void MultiBufferDataSource::Factory::OnUrlData(
-    DataSourceCb cb,
+    base::OnceCallback<void(std::unique_ptr<media::CrossOriginDataSource>)> cb,
     base::RepeatingCallback<void(bool)> download_cb,
     scoped_refptr<UrlData> data) {
   DCHECK(main_task_runner_->BelongsToCurrentThread());
