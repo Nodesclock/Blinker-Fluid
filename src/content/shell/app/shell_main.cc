@@ -7,6 +7,7 @@
 #include "content/shell/app/shell_main_delegate.h"
 
 #if BUILDFLAG(IS_WIN)
+#include "base/command_line.h"
 #include "base/win/dark_mode_support.h"
 #include "base/win/win_util.h"
 #include "content/public/app/sandbox_helper_win.h"
@@ -14,6 +15,7 @@
 #endif
 
 #if BUILDFLAG(IS_IOS)
+#include <dlfcn.h>
 #include <execinfo.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -51,6 +53,9 @@ int main() {
   // for the app if available.
   base::win::PinUser32();
   base::win::AllowDarkModeForApp(true);
+
+  // Sandbox initialization needs the command line before ContentMain().
+  base::CommandLine::Init(0, nullptr);
   sandbox::SandboxInterfaceInfo sandbox_info = {nullptr};
   content::InitializeSandboxInfo(&sandbox_info);
   content::ShellMainDelegate delegate;
@@ -65,20 +70,10 @@ int main() {
 
 #define IOS_INIT_EXPORT __attribute__((visibility("default")))
 
-// Early startup logger defined by the iOS application layer.
 extern "C" void BlinkBootLog(const char* stage);
 
-// Every diagnostic file used to be hardcoded under /var/mobile/Documents. That
-// works for a container-less jailbreak install, but an app with a real data
-// container (a TrollStore install has one) is sandboxed out of it, and each
-// writer failed silently: no boot log, no full Chromium log, and -- not just a
-// logging loss -- no crash-signal file, which is the input the JIT tier guard
-// uses to demote the engine after a codegen fault. Resolve the directory once,
-// preferring the shared path so existing tooling keeps working, and falling
-// back to $HOME/Documents, which is the container when sandboxed.
-//
-// C runtime only, and primed from the dyld constructor below: callers include
-// the async-signal-safe crash handler, which must never format a path itself.
+// застосунок з контейнером (як з TrollStore) не пише в /var/mobile/Documents
+// спершу контейнер, далі спільний шлях, далі $HOME/Documents
 static char g_blink_docs_dir[PATH_MAX];
 static char g_blink_boot_log_path[PATH_MAX];
 static char g_blink_boot_log_prev_path[PATH_MAX];
@@ -91,10 +86,8 @@ extern "C" const char* BlinkDocumentsDir() {
   if (g_blink_docs_dir[0]) {
     return g_blink_docs_dir;
   }
-  // Ask Foundation first. A sandboxed TrollStore app may pass access(W_OK) for
-  // /var/mobile/Documents during its early constructor and still have open()
-  // denied once the sandbox is fully applied, silently losing every log and
-  // the JIT crash guard. Foundation resolves the assigned data container.
+  // спершу Foundation, access(W_OK) на ранньому етапі проходить, а open()
+  // після пісочниці вже заборонено
   const char* container_documents = BlinkIOSContainerDocumentsDirectory();
   if (container_documents && container_documents[0]) {
     strlcpy(g_blink_docs_dir, container_documents,
@@ -154,12 +147,9 @@ extern "C" const char* BlinkFullLogPath() {
                        "content_shell_full.log");
 }
 
-// Runs at dyld image-load time, after the binary + dependent dylibs are mapped
-// and C++/ObjC static initializers run, but before main(). If this never logs,
-// the crash is in the loader/static-init itself (e.g. a bad dependency).
+// іде на завантаженні образу dyld, до main(). Нема рядка в логу значить
+// падіння в loader або static init
 __attribute__((constructor)) static void BlinkBootLogImageLoaded() {
-  // Resolve every diagnostic path before anything can fault, so the crash
-  // handler only ever reads an already-built string.
   BlinkBootLogPath();
   BlinkBootLogPrevPath();
   BlinkCrashSignalPath();
@@ -167,13 +157,14 @@ __attribute__((constructor)) static void BlinkBootLogImageLoaded() {
   BlinkBootLog("LOAD: dyld image loaded, constructors running (pre-main)");
 }
 
-// Records the fatal signal where the NEXT launch can read it, so a crash can be
-// attributed. In particular the JIT tier guard only demotes the engine for
-// signals that indicate generated code misbehaved (SIGILL/SIGBUS/SIGSEGV/
-// SIGTRAP) — an unrelated SIGABRT (an uncaught ObjC exception, say) must not
-// ratchet the engine down. Written with open/write/close only, which is
-// async-signal-safe; the file is one decimal number.
+// сторож JIT знижує рівень лише на SIGILL, SIGBUS, SIGSEGV і SIGTRAP
+// тільки open, write і close
 static void BlinkRecordCrashSignal(int sig) {
+  static volatile sig_atomic_t recorded = 0;
+  if (recorded) {
+    return;
+  }
+  recorded = 1;
   int fd = open(BlinkCrashSignalPath(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     return;
@@ -197,7 +188,7 @@ static void BlinkRecordCrashSignal(int sig) {
   close(fd);
 }
 
-// Appends "<label>0x<hex>\n". Async-signal-safe (no snprintf, no malloc).
+// без snprintf і malloc, бо кличеться з обробника сигналу
 static void BlinkWriteHex(int fd, const char* label, uint64_t value) {
   char buf[64];
   size_t len = 0;
@@ -221,9 +212,6 @@ static void BlinkWriteHex(int fd, const char* label, uint64_t value) {
   (void)written;
 }
 
-// Logs the VM protection of the page containing `addr` at crash time, encoded as
-// (cur_prot << 4) | max_prot (VM_PROT_READ=1 WRITE=2 EXECUTE=4), plus the region
-// base and size. Distinguishes a permission fault from a bad branch target.
 static void BlinkLogRegionProt(int fd, const char* label, uint64_t addr) {
   vm_address_t region = (vm_address_t)addr;
   vm_size_t size = 0;
@@ -237,7 +225,6 @@ static void BlinkLogRegionProt(int fd, const char* label, uint64_t addr) {
     BlinkWriteHex(fd, label, 0xDEAD0000u | (uint32_t)kr);
     return;
   }
-  // Pack: [cur_prot:4][max_prot:4] in low byte, region base, region size.
   BlinkWriteHex(fd, label,
                 ((uint64_t)(info.protection & 0xF) << 4) |
                     (uint64_t)(info.max_protection & 0xF));
@@ -245,33 +232,47 @@ static void BlinkLogRegionProt(int fd, const char* label, uint64_t addr) {
   BlinkWriteHex(fd, "  region_size: ", (uint64_t)size);
 }
 
-// Minimal signal handler for devices without a usable ReportCrash record.
-//
-// The faulting PC and address matter more than the backtrace here: backtrace()
-// walks the frame-pointer chain, which is meaningless once execution is inside
-// V8-generated code, so a JIT fault shows up as a stack of repeated builtin
-// trampolines that says nothing about where it actually died. si_addr and the
-// saved PC identify the faulting instruction directly, and comparing them
-// against the CodeRange says whether generated code was executing.
 extern "C" void BlinkCrashHandler(int sig);
 
-// Defined in v8 (code-memory-access.cc) only on the iOS mprotect-W^X build;
-// weak so the symbol is optional on other configurations.
 extern "C" __attribute__((weak)) void BlinkIOSWxState(
     int* depth, int* whole_writable, unsigned long long* transitions,
     unsigned long long* failures);
 
+// brk від CHECK або OOM теж дає SIGTRAP, і рівень сповзав до jitless
+// після звичайних нестач пам'яті. Тому дивимось чи впав саме згенерований код
+static bool BlinkFaultLooksLikeCodegen(int sig, siginfo_t* info, void* uap) {
+#if defined(__arm64__) || defined(__aarch64__)
+  ucontext_t* uc = (ucontext_t*)uap;
+  if (!uc || !uc->uc_mcontext) {
+    return true;
+  }
+  Dl_info dli;
+  if (!dladdr((void*)uc->uc_mcontext->__ss.__pc, &dli) || !dli.dli_fbase) {
+    return true;
+  }
+  if (sig == SIGTRAP || sig == SIGILL) {
+    return false;
+  }
+  const uint64_t addr = info ? (uint64_t)info->si_addr : 0;
+  if (addr < (1ull << 32)) {
+    return false;
+  }
+  Dl_info fault_dli;
+  return !(dladdr((void*)addr, &fault_dli) && fault_dli.dli_fbase);
+#else
+  return true;
+#endif
+}
+
 extern "C" void BlinkCrashHandlerWithInfo(int sig, siginfo_t* info, void* uap) {
-  BlinkRecordCrashSignal(sig);
+  BlinkRecordCrashSignal(BlinkFaultLooksLikeCodegen(sig, info, uap) ? sig : 0);
   int fd = open(BlinkBootLogPath(),
                 O_WRONLY | O_APPEND | O_CREAT, 0644);
   if (fd >= 0) {
     if (info) {
       BlinkWriteHex(fd, "CRASH_FAULT_ADDR: ", (uint64_t)info->si_addr);
       BlinkWriteHex(fd, "CRASH_FAULT_CODE: ", (uint64_t)(uint32_t)info->si_code);
-      // Real page protection at the fault address (cur<<4 | max; R=1 W=2 X=4).
-      // 0x54 = cur RX / max RXW is a healthy code page; 0x04/0x00 = the page
-      // lost execute or all access; region_base far from the fault = bad target.
+      // 0x54 це здорова сторінка коду, 0x04 або 0x00 значить execute пропав
       BlinkLogRegionProt(fd, "CRASH_FAULT_PROT: ", (uint64_t)info->si_addr);
     }
     if (BlinkIOSWxState) {
@@ -290,6 +291,32 @@ extern "C" void BlinkCrashHandlerWithInfo(int sig, siginfo_t* info, void* uap) {
         BlinkWriteHex(fd, "CRASH_PC: ", (uint64_t)uc->uc_mcontext->__ss.__pc);
         BlinkWriteHex(fd, "CRASH_LR: ", (uint64_t)uc->uc_mcontext->__ss.__lr);
         BlinkWriteHex(fd, "CRASH_SP: ", (uint64_t)uc->uc_mcontext->__ss.__sp);
+        Dl_info dli;
+        if (dladdr((void*)uc->uc_mcontext->__ss.__pc, &dli) && dli.dli_fbase) {
+          BlinkWriteHex(fd, "CRASH_IMAGE_BASE: ", (uint64_t)dli.dli_fbase);
+        }
+        const uint64_t sp = (uint64_t)uc->uc_mcontext->__ss.__sp;
+        uint64_t fp = (uint64_t)uc->uc_mcontext->__ss.__fp;
+        BlinkWriteHex(fd, "CRASH_FRAME: ", (uint64_t)uc->uc_mcontext->__ss.__pc);
+        BlinkWriteHex(fd, "CRASH_FRAME: ", (uint64_t)uc->uc_mcontext->__ss.__lr);
+        for (int i = 0; i < 32; ++i) {
+          // кадр має бути вище вказівника стека, вирівняний і недалеко,
+          // інакше читання вбило б обробник до запису
+          if (fp < sp || (fp & 0xf) != 0 || fp - sp > (16ull << 20)) {
+            break;
+          }
+          const uint64_t* frame = (const uint64_t*)fp;
+          const uint64_t next_fp = frame[0];
+          const uint64_t lr = frame[1];
+          if (!lr) {
+            break;
+          }
+          BlinkWriteHex(fd, "CRASH_FRAME: ", lr);
+          if (next_fp <= fp) {
+            break;
+          }
+          fp = next_fp;
+        }
       }
     }
 #endif
@@ -328,10 +355,6 @@ extern "C" void BlinkCrashHandler(int sig) {
   raise(sig);
 }
 
-// Arms our crash handler via sigaction on an alternate stack (survives stack
-// overflow). Exposed extern "C" so it can be RE-armed after Chromium installs
-// its own signal handlers during startup (which otherwise replace ours, making
-// post-startup crashes bypass this logger). Safe to call repeatedly.
 static char g_blink_altstack[65536];
 extern "C" void BlinkArmCrashHandler(void) {
   stack_t ss;
@@ -351,8 +374,8 @@ extern "C" void BlinkArmCrashHandler(void) {
   }
 }
 
-// Priority 101 = runs before all default-priority static initializers (incl.
-// V8's), so the handler is armed before whatever is crashing in static-init.
+// пріоритет 101 іде до всіх звичайних static init і V8,
+// обробник стоїть ще до збою
 __attribute__((constructor(101))) static void BlinkInstallCrashHandler() {
   BlinkBootLog("CTOR101: earliest ctor, arming crash handler");
   BlinkArmCrashHandler();

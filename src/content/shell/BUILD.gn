@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/config/cast.gni")
-import("//build/config/chromeos/ui_mode.gni")
 import("//build/config/ozone.gni")
 import("//build/config/sanitizers/sanitizers.gni")
 import("//build/config/ui.gni")
@@ -37,31 +36,35 @@ if (is_android) {
   import("//build/config/apple/mobile_config.gni")
   import("//build/config/apple/swift_source_set.gni")
   import("//build/config/ios/ios_app_ipa.gni")
+  import("//v8/gni/v8.gni")
 
   if (target_platform == "iphoneos") {
     import("//content/shell/app/ios/extensions.gni")
   }
 }
 
-# TODO(crbug.com/1336055, spang): Investigate using shell_views with cast builds as
-# true.
+# TODO(crbug.com/1336055, spang): Investigate using shell_views with cast builds
+# as true.
 shell_use_toolkit_views = toolkit_views && !is_castos
 
 declare_args() {
   content_shell_product_name = "Content Shell"
-  content_shell_version = "149.0.7821.0"
-  content_shell_major_version = "149"
+  content_shell_version = "156.0.8078.44"
+  content_shell_major_version = "156"
 
-  # Compiles Blinker's verbose boot-log tracing into the shell. Enabled for
-  # debug builds; shipping builds retain only the critical
-  # crash/OOM/launch markers remain. See content/shell/common/blinker_diagnostics.h.
+  # Детальний boot log у shell, лиш для debug. У релізі лишаються тільки
+  # маркери crash/OOM/launch (content/shell/common/blinker_diagnostics.h).
   blinker_enable_diagnostics = is_debug
 }
 
-# Applied to the shell targets that carry Blinker instrumentation.
 config("blinker_diagnostics_config") {
+  defines = []
   if (!blinker_enable_diagnostics) {
-    defines = [ "BLINKER_DISABLE_DIAGNOSTICS" ]
+    defines += [ "BLINKER_DISABLE_DIAGNOSTICS" ]
+  }
+  if (is_ios && (ios_deployment_target == "11.0" ||
+                 ios_deployment_target == "12.0")) {
+    defines += [ "BLINKER_LEGACY_LOW_MEMORY" ]
   }
 }
 
@@ -139,11 +142,12 @@ static_library("content_shell_app") {
     ]
   }
   if (is_ios) {
-    # These frameworks do not exist on every supported iOS version. Keep them
-    # weak-linked; their call sites are protected by availability checks.
+    # Цих фреймворків нема на всіх iOS тому weak. Виклики закриті перевірками
+    # доступності.
     weak_frameworks = [
       "AVKit.framework",
       "LinkPresentation.framework",
+      "PassKit.framework",
       "UniformTypeIdentifiers.framework",
     ]
     sources += [
@@ -168,6 +172,9 @@ static_library("content_shell_app") {
     "CONTENT_SHELL_VERSION=\"$content_shell_version\"",
     "CONTENT_SHELL_MAJOR_VERSION=\"$content_shell_major_version\"",
   ]
+  if (is_ios && v8_enable_pointer_compression) {
+    defines += [ "BLINKER_V8_POINTER_CAGE" ]
+  }
 }
 
 inspector_protocol_generate("protocol_sources") {
@@ -212,12 +219,41 @@ static_library("content_shell_lib") {
     "browser/shell_browser_main_parts.cc",
     "browser/shell_browser_main_parts.h",
     "browser/blinker_content_filter.cc",
+    "browser/blinker_crx_installer.cc",
+    "browser/blinker_crx_installer.h",
+    "browser/blinker_extension_api.cc",
+    "browser/blinker_extension_api.h",
+    "browser/blinker_extension_api_tables.h",
+    "browser/blinker_extension_messaging.cc",
+    "browser/blinker_extension_net_actions.cc",
+    "browser/blinker_extension_net_actions.h",
+    "browser/blinker_extension_messaging.h",
+    "browser/blinker_extension_storage.cc",
+    "browser/blinker_extension_storage.h",
+    "browser/blinker_extension_url_loader_factory.cc",
+    "browser/blinker_extension_url_loader_factory.h",
+    "browser/blinker_web_extension.cc",
+    "browser/blinker_web_extension.h",
     "browser/blinker_content_filter.h",
+    "browser/blinker_tracking_params.cc",
+    "browser/blinker_tracking_params.h",
+    "browser/blinker_client_hints.cc",
+    "browser/blinker_client_hints.h",
     "browser/blinker_extensions.cc",
     "browser/blinker_extensions.h",
+    "browser/blinker_filter_subscriptions.cc",
+    "browser/blinker_filter_subscriptions.h",
     "common/blinker_diagnostics.h",
     "common/blinker_private_logging.h",
+    "common/blinker_low_memory.h",
     "common/blinker_site_policy.h",
+    "common/blinker_bookmarks_html.h",
+    "common/blinker_dino_game.h",
+    "common/blinker_error_page.h",
+    "common/blinker_web_colors.h",
+    "common/blinker_tracking_query.h",
+    "common/blinker_selection_color.h",
+    "common/blinker_update_asset.h",
     "browser/shell_content_browser_client.cc",
     "browser/shell_content_browser_client.h",
     "browser/shell_content_index_provider.cc",
@@ -228,6 +264,8 @@ static_library("content_shell_lib") {
     "browser/shell_devtools_frontend.h",
     "browser/shell_devtools_manager_delegate.cc",
     "browser/shell_devtools_manager_delegate.h",
+    "browser/blinker_web_request.cc",
+    "browser/blinker_web_request.h",
     "browser/shell_download_manager_delegate.cc",
     "browser/shell_download_manager_delegate.h",
     "browser/shell_javascript_dialog.h",
@@ -312,6 +350,11 @@ static_library("content_shell_lib") {
       "browser/shell_browser_main_parts_ios.mm",
       "browser/shell_file_select_helper.cc",
       "browser/shell_file_select_helper.h",
+      "browser/blinker_session_store.h",
+      "browser/blinker_link_preview_ios.h",
+      "browser/blinker_link_preview_ios.mm",
+      "browser/blinker_session_store_ios.mm",
+      "browser/blinker_ui_strings.h",
       "browser/shell_platform_delegate_ios.mm",
       "browser/shell_web_contents_view_delegate_ios.mm",
     ]
@@ -352,6 +395,10 @@ static_library("content_shell_lib") {
     "//services/network:network_service",
   ]
   deps = [
+    ":blinker_script_executor_mojom",
+    "//components/crx_file",
+    "//third_party/re2",
+    "//third_party/zlib/google:zip",
     ":content_browsertests_mojom",
     ":protocol_sources",
     ":resources",
@@ -361,6 +408,7 @@ static_library("content_shell_lib") {
     ":shell_controller_mojom",
     "//base",
     "//base:base_static",
+    "//base:i18n",
     "//components/cdm/renderer",
     "//components/custom_handlers",
     "//components/custom_handlers:test_support",
@@ -455,6 +503,7 @@ static_library("content_shell_lib") {
 
   if (is_ios) {
     deps += [
+      "//components/application_locale_storage",
       "//components/permissions",
       "//components/strings:components_strings",
       "//services/tracing/public/cpp",
@@ -523,10 +572,6 @@ static_library("content_shell_lib") {
   if (use_ozone) {
     deps += [ "//ui/ozone" ]
   }
-
-  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
-  # enable the diagnostic by removing this line.
-  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 grit("content_shell_resources_grit") {
@@ -562,13 +607,11 @@ repack("pak") {
   sources = [
     "$root_gen_dir/base/tracing/protos/tracing_proto_resources.pak",
     "$root_gen_dir/components/ukm_resources.pak",
-    "$root_gen_dir/content/attribution_internals_resources.pak",
     "$root_gen_dir/content/browser/resources/media/media_internals_resources.pak",
     "$root_gen_dir/content/browser/webrtc/resources/webrtc_internals_resources.pak",
     "$root_gen_dir/content/content_resources.pak",
     "$root_gen_dir/content/gpu_resources.pak",
     "$root_gen_dir/content/histograms_resources.pak",
-    "$root_gen_dir/content/private_aggregation_internals_resources.pak",
     "$root_gen_dir/content/process_resources.pak",
     "$root_gen_dir/content/quota_internals_resources.pak",
     "$root_gen_dir/content/service_worker_resources.pak",
@@ -664,6 +707,7 @@ if (is_android) {
       content_shell_version,
     ]
   }
+
   mac_app_bundle("content_shell") {
     testonly = true
     output_name = content_shell_product_name
@@ -676,6 +720,9 @@ if (is_android) {
     deps = [
       ":content_shell_framework_bundle_data",
       ":content_shell_resources_bundle_data",
+
+      # This target contains only macros. No C++ declarations/definitions.
+      "//base:compiler_specific",
 
       # Despite its path, this does not add a //base dependency, see comments in
       # the .cc file.
@@ -691,8 +738,8 @@ if (is_android) {
   }
 } else if (is_ios) {
   declare_args() {
-    # The bundle identifier. Overriding this will affect the provisioning profile
-    # used, and hence will affect the app's capabilities.
+    # The bundle identifier. Overriding this will affect the provisioning
+    # profile used, and hence will affect the app's capabilities.
     ios_content_shell_bundle_identifier = shared_bundle_id_for_test_apps
 
     # Path to an entitlements file used in ios_content_shell. Can be overridden
@@ -723,19 +770,23 @@ if (is_android) {
 
     deps = [ ":content_shell_framework+link" ]
 
-    # iOS-15 port (single-process): the BEK extension bundles are dropped here.
-    # They require iOS 16+/17.4+ (AppExtension protocol, applyRestrictedSandbox) and
-    # are unused when the renderer/GPU/network run in-process.
+    # Однопроцесна збірка, BEK extension bundles тут викинуті. Вони хочуть
+    # iOS 16+/17.4+ і без окремих процесів не потрібні.
 
     bundle_deps = [
       ":content_shell_framework+bundle",
       ":content_shell_framework_resources",
     ]
-    # The legacy package reuses the already compiled catalog. Xcode's actool
-    # unnecessarily requires a matching simulator runtime even for a device
-    # catalog, which is not installed in the lightweight build VM.
-    if (!blinker_legacy_ios_address_space) {
-      bundle_deps += [ "app/ios/resources" ]
+    bundle_deps += [
+      "app/ios/resources:app_icons",
+      "app/ios/resources:prebuilt_catalog",
+      "app/ios/resources:ui_strings",
+    ]
+    if (ios_deployment_target == "11.0" || ios_deployment_target == "12.0") {
+      bundle_deps += [
+        "app/ios/resources:legacy_toolbar_icons",
+        "app/ios/resources:sf_symbols",
+      ]
     }
     entitlements_path = ios_content_shell_entitlements_path
     bundle_identifier = ios_content_shell_bundle_identifier
@@ -891,6 +942,7 @@ if (is_apple) {
       }
       if (!use_v8_context_snapshot || include_both_v8_snapshots) {
         sources += [ "$root_out_dir/snapshot_blob.bin" ]
+        public_deps += [ "//v8:run_mksnapshot_default" ]
       }
     }
 
@@ -902,12 +954,14 @@ if (is_mac) {
   content_shell_framework_name = "$content_shell_product_name Framework"
   content_shell_helper_name = "$content_shell_product_name Helper"
 
+  content_shell_mac_helpers = content_mac_helpers + content_mac_aperitif_helpers
+
   bundle_data("content_shell_framework_helpers") {
     testonly = true
     sources = [ "$root_out_dir/chrome_crashpad_handler" ]
     outputs = [ "{{bundle_contents_dir}}/Helpers/{{source_file_part}}" ]
     public_deps = [ "//components/crash/core/app:chrome_crashpad_handler" ]
-    foreach(helper_params, content_mac_helpers) {
+    foreach(helper_params, content_shell_mac_helpers) {
       sources += [
         "$root_out_dir/${content_shell_helper_name}${helper_params[2]}.app",
       ]
@@ -963,6 +1017,7 @@ if (is_mac) {
       ":content_shell_framework_resources",
       ":content_shell_swiftshader_binaries",
     ]
+    bundle_deps += [ ":content_shell_vulkan_binaries" ]
 
     if (!is_component_build) {
       # Specify a sensible install_name for static builds. The library is
@@ -980,9 +1035,10 @@ if (is_mac) {
           [ "-Wl,-install_name,@rpath/$output_name.framework/$output_name" ]
 
       # Set up the rpath for the framework so that it can find dylibs in the
-      # root output directory. The framework is at
-      # Content Shell.app/Contents/Frameworks/Content Shell Framework.framework/Versions/C/Content Shell Framework
-      # so use loader_path to go back to the root output directory.
+      # root output directory. The framework is at Content
+      # Shell.app/Contents/Frameworks/Content Shell
+      # Framework.framework/Versions/C/Content Shell Framework so use
+      # loader_path to go back to the root output directory.
       ldflags += [ "-Wl,-rpath,@loader_path/../../../../../.." ]
     }
 
@@ -1020,6 +1076,8 @@ if (is_mac) {
         "CONTENT_SHELL_HELPER_BUNDLE_ID_SUFFIX=${invoker.helper_bundle_id_suffix}",
       ]
       deps = [
+        # This target contains only macros. No C++ declarations/definitions.
+        "//base:compiler_specific",
         "//base/allocator:early_zone_registration_apple",
         "//sandbox/mac:seatbelt",
       ]
@@ -1028,7 +1086,9 @@ if (is_mac) {
 
       if (is_component_build) {
         ldflags = [
-          # The helper is in Content Shell.app/Contents/Frameworks/Content Shell Framework.framework/Versions/C/Helpers/Content Shell Helper.app/Contents/MacOS
+          # The helper is in Content Shell.app/Contents/Frameworks/Content Shell
+          # Framework.framework/Versions/C/Helpers/Content Shell
+          # Helper.app/Contents/MacOS
 
           # Set up an rpath to the Contents/Frameworks/ directory so that
           # Content Shell Framework.framework will be found there. This matches
@@ -1048,10 +1108,11 @@ if (is_mac) {
     }
   }
 
-  foreach(helper_params, content_mac_helpers) {
+  foreach(helper_params, content_shell_mac_helpers) {
     _helper_target = helper_params[0]
     _helper_bundle_id = helper_params[1]
     _helper_suffix = helper_params[2]
+
     content_shell_helper_app("content_shell_helper_app_${_helper_target}") {
       helper_name_suffix = _helper_suffix
       helper_bundle_id_suffix = _helper_bundle_id
@@ -1099,10 +1160,26 @@ if (is_mac) {
     outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
     public_deps = [ "//ui/gl:swiftshader_vk_library_copy" ]
   }
+
+  # Add the Vulkan loader .dylib in the Libraries directory of the Framework.
+  bundle_data("content_shell_vulkan_binaries") {
+    sources = [ "$root_out_dir/vulkan_intermediates/libvulkan.dylib" ]
+    outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
+    public_deps = [ "//ui/gl:vulkan_loader_library_copy" ]
+  }
+}
+
+mojom("blinker_script_executor_mojom") {
+  generate_legacy_js = false
+  sources = [ "common/blinker_script_executor.mojom" ]
+  public_deps = [
+    "//mojo/public/mojom/base",
+    "//url/mojom:url_mojom_gurl",
+  ]
 }
 
 mojom("content_browsertests_mojom") {
-  cpp_only = true
+  generate_legacy_js = false
   sources = [
     "common/main_frame_counter_test.mojom",
     "common/memory_coordinator/memory_coordinator_test.mojom",
@@ -1119,9 +1196,12 @@ mojom("content_browsertests_mojom") {
 }
 
 if (is_android) {
-  script_test("content_shell_freeze_test") {
+  group("content_shell_freeze_test") {
     testonly = true
-    script = "//content/shell/tools/aaudio_freezer_integration_test.py"
+    data = [
+      "//content/shell/tools/aaudio_freezer_integration_test.py",
+      "//content/test/data/media/",
+    ]
     data_deps = [
       ":content_shell",
       "//build/android:devil_chromium_py",
@@ -1139,6 +1219,14 @@ group("content_shell_crash_test") {
     "//testing:test_scripts_shared",
     "//third_party/angle:includes",
   ]
+  if (is_fuchsia) {
+    data_deps += [
+      ":content_shell_pkg",
+      ":content_shell_pkg__archive-manifest",
+      ":content_shell_script_meta",
+      "//build/config/fuchsia:deployment_resources",
+    ]
+  }
   data = [
     "//content/shell/tools/breakpad_integration_test.py",
     "//testing/scripts/content_shell_crash_test.py",
@@ -1199,6 +1287,8 @@ rust_static_library("rust_test_service") {
   sources = [ "browser/rust_test_service.rs" ]
   deps = [
     ":rust_test_mojom_rust",
+    "//base:command_line",
+    "//base:feature",
     "//mojo/public/rust/bindings",
   ]
 }

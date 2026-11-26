@@ -1,0 +1,236 @@
+# Copyright 2022 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/config/ios/rules.gni")
+
+bundle_data_xcassets("resources") {
+  catalog = "Assets.xcassets"
+  sources = [
+    "Assets.xcassets/Contents.json",
+    "Assets.xcassets/ic_back.imageset/Contents.json",
+    "Assets.xcassets/ic_back.imageset/ic_back.png",
+    "Assets.xcassets/ic_back.imageset/ic_back_2x.png",
+    "Assets.xcassets/ic_back.imageset/ic_back_3x.png",
+    "Assets.xcassets/ic_forward.imageset/Contents.json",
+    "Assets.xcassets/ic_forward.imageset/ic_forward.png",
+    "Assets.xcassets/ic_forward.imageset/ic_forward_2x.png",
+    "Assets.xcassets/ic_forward.imageset/ic_forward_3x.png",
+    "Assets.xcassets/ic_menu.imageset/Contents.json",
+    "Assets.xcassets/ic_menu.imageset/ic_menu.png",
+    "Assets.xcassets/ic_menu.imageset/ic_menu_2x.png",
+    "Assets.xcassets/ic_menu.imageset/ic_menu_3x.png",
+    "Assets.xcassets/ic_reload.imageset/Contents.json",
+    "Assets.xcassets/ic_reload.imageset/ic_reload.png",
+    "Assets.xcassets/ic_reload.imageset/ic_reload_2x.png",
+    "Assets.xcassets/ic_reload.imageset/ic_reload_3x.png",
+    "Assets.xcassets/ic_stop.imageset/Contents.json",
+    "Assets.xcassets/ic_stop.imageset/ic_stop.png",
+    "Assets.xcassets/ic_stop.imageset/ic_stop_2x.png",
+    "Assets.xcassets/ic_stop.imageset/ic_stop_3x.png",
+  ]
+}
+
+# actool хоче simulator runtime навіть для device каталогу, а на VM його нема.
+# Це той самий каталог, зібраний коли runtime ще був.
+bundle_data("prebuilt_catalog") {
+  sources = [ "prebuilt/Assets.car" ]
+  outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
+}
+
+# Іконка на головному екрані та лого стартової сторінки. Info.plist посилається
+# на них за ім'ям, тож без цього кожна збірка виходила без іконки.
+bundle_data("app_icons") {
+  sources = [
+    "icons/AppIcon60x60@2x.png",
+    "icons/AppIcon60x60@3x.png",
+    "icons/AppIcon76x76@2x.png",
+    "icons/blinker_logo.png",
+    "icons/blinker_logo@2x.png",
+    "icons/blinker_logo@3x.png",
+  ]
+  outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
+}
+
+# Переклади інтерфейсу, читає BlinkL.
+bundle_data("ui_strings") {
+  sources = [ "ui_strings.json" ]
+  outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
+}
+
+# Значки меню і налаштувань для iOS 12, де SF Symbols нема. Намальовані з SF
+# Symbols на Mac (tools/blinker/render_sf_symbols.swift).
+bundle_data("sf_symbols") {
+  sources = [
+    "sf_symbols/sf_applelogo@2x.png",
+    "sf_symbols/sf_applelogo@3x.png",
+    "sf_symbols/sf_arrow_clockwise@2x.png",
+    "sf_symbols/sf_arrow_clockwise@3x.png",
+    "sf_symbols/sf_arrow_down_circle@2x.png",
+    "sf_symbols/sf_arrow_down_circle@3x.png",
+    "sf_symbols/sf_arrow_down_doc@2x.png",
+    "sf_symbols/sf_arrow_down_doc@3x.png",
+    "sf_symbols/sf_arrow_triangle_2_circlepath@2x.png",
+    "sf_symbols/sf_arrow_triangle_2_circlepath@3x.png",
+    "sf_symbols/sf_arrow_up_left_and_arrow_down_right@2x.png",
+    "sf_symbols/sf_arrow_up_left_and_arrow_down_right@3x.png",
+    "sf_symbols/sf_arrow_uturn_backward@2x.png",
+    "sf_symbols/sf_arrow_uturn_backward@3x.png",
+    "sf_symbols/sf_bolt_fill@2x.png",
+    "sf_symbols/sf_bolt_fill@3x.png",
+    "sf_symbols/sf_bookmark@2x.png",
+    "sf_symbols/sf_bookmark@3x.png",
+    "sf_symbols/sf_camera@2x.png",
+    "sf_symbols/sf_camera@3x.png",
+    "sf_symbols/sf_character_bubble@2x.png",
+    "sf_symbols/sf_character_bubble@3x.png",
+    "sf_symbols/sf_checkmark_shield@2x.png",
+    "sf_symbols/sf_checkmark_shield@3x.png",
+    "sf_symbols/sf_chevron_down@2x.png",
+    "sf_symbols/sf_chevron_down@3x.png",
+    "sf_symbols/sf_chevron_left@2x.png",
+    "sf_symbols/sf_chevron_left@3x.png",
+    "sf_symbols/sf_chevron_left_forwardslash_chevron_right@2x.png",
+    "sf_symbols/sf_chevron_left_forwardslash_chevron_right@3x.png",
+    "sf_symbols/sf_chevron_up@2x.png",
+    "sf_symbols/sf_chevron_up@3x.png",
+    "sf_symbols/sf_circle_lefthalf_filled@2x.png",
+    "sf_symbols/sf_circle_lefthalf_filled@3x.png",
+    "sf_symbols/sf_circle_slash@2x.png",
+    "sf_symbols/sf_circle_slash@3x.png",
+    "sf_symbols/sf_clock_arrow_circlepath@2x.png",
+    "sf_symbols/sf_clock_arrow_circlepath@3x.png",
+    "sf_symbols/sf_desktopcomputer@2x.png",
+    "sf_symbols/sf_desktopcomputer@3x.png",
+    "sf_symbols/sf_doc_on_doc@2x.png",
+    "sf_symbols/sf_doc_on_doc@3x.png",
+    "sf_symbols/sf_exclamationmark_triangle_fill@2x.png",
+    "sf_symbols/sf_exclamationmark_triangle_fill@3x.png",
+    "sf_symbols/sf_eye@2x.png",
+    "sf_symbols/sf_eye@3x.png",
+    "sf_symbols/sf_eye_slash@2x.png",
+    "sf_symbols/sf_eye_slash@3x.png",
+    "sf_symbols/sf_folder_fill@2x.png",
+    "sf_symbols/sf_folder_fill@3x.png",
+    "sf_symbols/sf_gear@2x.png",
+    "sf_symbols/sf_gear@3x.png",
+    "sf_symbols/sf_gearshape@2x.png",
+    "sf_symbols/sf_gearshape@3x.png",
+    "sf_symbols/sf_globe@2x.png",
+    "sf_symbols/sf_globe@3x.png",
+    "sf_symbols/sf_hand_raised@2x.png",
+    "sf_symbols/sf_hand_raised@3x.png",
+    "sf_symbols/sf_hand_raised_slash@2x.png",
+    "sf_symbols/sf_hand_raised_slash@3x.png",
+    "sf_symbols/sf_heart_circle@2x.png",
+    "sf_symbols/sf_heart_circle@3x.png",
+    "sf_symbols/sf_house@2x.png",
+    "sf_symbols/sf_house@3x.png",
+    "sf_symbols/sf_info_circle@2x.png",
+    "sf_symbols/sf_info_circle@3x.png",
+    "sf_symbols/sf_link@2x.png",
+    "sf_symbols/sf_link@3x.png",
+    "sf_symbols/sf_location@2x.png",
+    "sf_symbols/sf_location@3x.png",
+    "sf_symbols/sf_lock_fill@2x.png",
+    "sf_symbols/sf_lock_fill@3x.png",
+    "sf_symbols/sf_lock_shield@2x.png",
+    "sf_symbols/sf_lock_shield@3x.png",
+    "sf_symbols/sf_lock_shield_fill@2x.png",
+    "sf_symbols/sf_lock_shield_fill@3x.png",
+    "sf_symbols/sf_macwindow_badge_plus@2x.png",
+    "sf_symbols/sf_macwindow_badge_plus@3x.png",
+    "sf_symbols/sf_magnifyingglass@2x.png",
+    "sf_symbols/sf_magnifyingglass@3x.png",
+    "sf_symbols/sf_memorychip@2x.png",
+    "sf_symbols/sf_memorychip@3x.png",
+    "sf_symbols/sf_mic@2x.png",
+    "sf_symbols/sf_mic@3x.png",
+    "sf_symbols/sf_network@2x.png",
+    "sf_symbols/sf_network@3x.png",
+    "sf_symbols/sf_paintbrush@2x.png",
+    "sf_symbols/sf_paintbrush@3x.png",
+    "sf_symbols/sf_paintpalette@2x.png",
+    "sf_symbols/sf_paintpalette@3x.png",
+    "sf_symbols/sf_person_badge_plus@2x.png",
+    "sf_symbols/sf_person_badge_plus@3x.png",
+    "sf_symbols/sf_person_crop_circle@2x.png",
+    "sf_symbols/sf_person_crop_circle@3x.png",
+    "sf_symbols/sf_person_crop_circle_badge_plus@2x.png",
+    "sf_symbols/sf_person_crop_circle_badge_plus@3x.png",
+    "sf_symbols/sf_person_text_rectangle@2x.png",
+    "sf_symbols/sf_person_text_rectangle@3x.png",
+    "sf_symbols/sf_photo@2x.png",
+    "sf_symbols/sf_photo@3x.png",
+    "sf_symbols/sf_photo_on_rectangle@2x.png",
+    "sf_symbols/sf_photo_on_rectangle@3x.png",
+    "sf_symbols/sf_plus@2x.png",
+    "sf_symbols/sf_plus@3x.png",
+    "sf_symbols/sf_plus_square_on_square@2x.png",
+    "sf_symbols/sf_plus_square_on_square@3x.png",
+    "sf_symbols/sf_puzzlepiece_extension@2x.png",
+    "sf_symbols/sf_puzzlepiece_extension@3x.png",
+    "sf_symbols/sf_rectangle_bottomthird_inset_filled@2x.png",
+    "sf_symbols/sf_rectangle_bottomthird_inset_filled@3x.png",
+    "sf_symbols/sf_rectangle_on_rectangle_slash@2x.png",
+    "sf_symbols/sf_rectangle_on_rectangle_slash@3x.png",
+    "sf_symbols/sf_rectangle_portrait_and_arrow_right@2x.png",
+    "sf_symbols/sf_rectangle_portrait_and_arrow_right@3x.png",
+    "sf_symbols/sf_safari@2x.png",
+    "sf_symbols/sf_safari@3x.png",
+    "sf_symbols/sf_shield_lefthalf_fill@2x.png",
+    "sf_symbols/sf_shield_lefthalf_fill@3x.png",
+    "sf_symbols/sf_slider_horizontal_3@2x.png",
+    "sf_symbols/sf_slider_horizontal_3@3x.png",
+    "sf_symbols/sf_sparkles@2x.png",
+    "sf_symbols/sf_sparkles@3x.png",
+    "sf_symbols/sf_speaker_slash_fill@2x.png",
+    "sf_symbols/sf_speaker_slash_fill@3x.png",
+    "sf_symbols/sf_speaker_wave_2_fill@2x.png",
+    "sf_symbols/sf_speaker_wave_2_fill@3x.png",
+    "sf_symbols/sf_square_and_arrow_down@2x.png",
+    "sf_symbols/sf_square_and_arrow_down@3x.png",
+    "sf_symbols/sf_square_and_arrow_up@2x.png",
+    "sf_symbols/sf_square_and_arrow_up@3x.png",
+    "sf_symbols/sf_square_grid_2x2@2x.png",
+    "sf_symbols/sf_square_grid_2x2@3x.png",
+    "sf_symbols/sf_square_on_square@2x.png",
+    "sf_symbols/sf_square_on_square@3x.png",
+    "sf_symbols/sf_star@2x.png",
+    "sf_symbols/sf_star@3x.png",
+    "sf_symbols/sf_text_cursor@2x.png",
+    "sf_symbols/sf_text_cursor@3x.png",
+    "sf_symbols/sf_textformat@2x.png",
+    "sf_symbols/sf_textformat@3x.png",
+    "sf_symbols/sf_textformat_size@2x.png",
+    "sf_symbols/sf_textformat_size@3x.png",
+    "sf_symbols/sf_trash@2x.png",
+    "sf_symbols/sf_trash@3x.png",
+    "sf_symbols/sf_xmark_circle_fill@2x.png",
+    "sf_symbols/sf_xmark_circle_fill@3x.png",
+  ]
+  outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
+}
+
+# Значки панелі для iOS 12. Prebuilt Assets.car зібраний для новіших iOS і на
+# iOS 12 картинок не віддає, тоді кнопки ставали текстом, а панель вдвічі вищою.
+bundle_data("legacy_toolbar_icons") {
+  sources = [
+    "legacy_toolbar/ic_back.png",
+    "legacy_toolbar/ic_back@2x.png",
+    "legacy_toolbar/ic_back@3x.png",
+    "legacy_toolbar/ic_forward.png",
+    "legacy_toolbar/ic_forward@2x.png",
+    "legacy_toolbar/ic_forward@3x.png",
+    "legacy_toolbar/ic_menu.png",
+    "legacy_toolbar/ic_menu@2x.png",
+    "legacy_toolbar/ic_menu@3x.png",
+    "legacy_toolbar/ic_reload.png",
+    "legacy_toolbar/ic_reload@2x.png",
+    "legacy_toolbar/ic_reload@3x.png",
+    "legacy_toolbar/ic_stop.png",
+    "legacy_toolbar/ic_stop@2x.png",
+    "legacy_toolbar/ic_stop@3x.png",
+  ]
+  outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
+}

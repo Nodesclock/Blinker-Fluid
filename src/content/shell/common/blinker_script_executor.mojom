@@ -1,0 +1,20 @@
+module content.mojom;
+
+import "mojo/public/mojom/base/values.mojom";
+import "url/mojom/url.mojom";
+
+// Браузер перевіряє дозволи до запиту. Рендерер дивиться чи документ
+// за цей час не перейшов на іншу адресу
+interface BlinkerScriptExecutor {
+  Execute(int32 world_id, url.mojom.Url document_url, array<string> sources)
+      => (mojo_base.mojom.Value? result, string? error, string document_id);
+
+  // Ховає каретку рушія, поки Blinker малює свою. Нові документи
+  // рендерер налаштовує сам, це лише для вже відкритих
+  SetEngineCaretHidden(bool hidden);
+
+  InsertCSS(url.mojom.Url document_url, string key, string css,
+            bool user_origin) => (string? error);
+  RemoveCSS(url.mojom.Url document_url, string key, bool user_origin)
+      => (string? error);
+};

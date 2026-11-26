@@ -21,35 +21,21 @@ namespace content::blinker_memory {
 
 inline constexpr uint64_t kMiB = 1024ULL * 1024ULL;
 
-// Derive thresholds from the process's runtime memory ceiling.
-// os_proc_available_memory() returns the bytes this process may still grow by
-// before jetsam kills it, so `phys_footprint + available` is the actual limit
-// the kernel is enforcing — it automatically accounts for device RAM, the
-// increased-memory-limit entitlement and the foreground/background band, none
-// of which a compile-time constant can know.
-//
-// The result is clamped: the floor keeps a small/low-memory device no worse off
-// than the old policy, and the cap keeps the app a well-behaved citizen (a
-// browser that is *allowed* to reach 3 GB will happily do so and start evicting
-// every other app on the phone) while still granting ~2x the old headroom.
+// Стеля це phys_footprint + os_proc_available_memory(), тобто ліміт jetsam
+// знизу обмежена для слабких пристроїв
 inline constexpr uint64_t kCeilingFloor = 700 * kMiB;
 inline constexpr uint64_t kCeilingCap = 1800 * kMiB;
 inline constexpr uint64_t kFallbackCeiling = 900 * kMiB;
 
-// Fractions of the ceiling at which each action fires.
 inline constexpr uint64_t kModeratePercent = 55;
 inline constexpr uint64_t kCriticalPercent = 72;
 inline constexpr uint64_t kBlockNewContentsPercent = 82;
 
-// Absolute floors for the remaining-headroom triggers. Headroom is the
-// authoritative jetsam signal (footprint is only a secondary guard), so these
-// stay generous no matter how large the ceiling turns out to be.
+// Головний сигнал це запас до jetsam, footprint запасний, тому пороги
+// лишаємо щедрими
 inline constexpr uint64_t kMinModerateAvailable = 280 * kMiB;
 inline constexpr uint64_t kMinCriticalAvailable = 140 * kMiB;
 
-// Installed RAM. Always answerable, including before the app is foreground,
-// which is what makes it usable for decisions that have to be made during
-// startup (V8's heap flags are fixed when the isolate is created).
 inline uint64_t DevicePhysicalMemory() {
 #if BUILDFLAG(IS_IOS)
   static const uint64_t mem = [] {
@@ -66,8 +52,6 @@ inline uint64_t DevicePhysicalMemory() {
 #endif
 }
 
-// Returns the process footprint ceiling. Foreground readings are cached;
-// unavailable startup readings use the fallback without caching it.
 inline uint64_t MemoryCeiling() {
 #if BUILDFLAG(IS_IOS)
   static std::atomic<uint64_t> cached{0};
@@ -79,11 +63,8 @@ inline uint64_t MemoryCeiling() {
   if (__builtin_available(iOS 13.0, *)) {
     available = static_cast<uint64_t>(os_proc_available_memory());
   } else {
-    // iOS 11/12 cannot report the process's remaining jetsam headroom.  A
-    // 1GB A7/A8 device is normally killed around 620-660MiB, so the old 900MiB
-    // fallback made every pressure threshold fire after it was already too
-    // late.  Use the conservative floor for those devices; larger legacy
-    // devices retain the general fallback.
+    // iOS 11 і 12 не віддає запас до jetsam. Пристрій з 1GB вбиває десь між
+    // 620 і 660MiB, тому нижня межа
     return DevicePhysicalMemory() < 1500 * kMiB ? kCeilingFloor
                                                  : kFallbackCeiling;
   }
@@ -107,28 +88,22 @@ inline uint64_t MemoryCeiling() {
 #endif
 }
 
-// Footprint at which to ask Blink/V8/Skia to shed caches.
 inline uint64_t ModerateFootprint() {
   return MemoryCeiling() * kModeratePercent / 100;
 }
 
-// Footprint at which to force an aggressive purge.
 inline uint64_t CriticalFootprint() {
   return MemoryCeiling() * kCriticalPercent / 100;
 }
 
-// Footprint above which new WebContents are refused rather than risking a
-// jetsam kill that would lose the user's session.
 inline uint64_t BlockNewContentsFootprint() {
   return MemoryCeiling() * kBlockNewContentsPercent / 100;
 }
 
-// Remaining headroom below which to shed caches.
 inline uint64_t ModerateAvailable() {
   return std::max(kMinModerateAvailable, MemoryCeiling() * 18 / 100);
 }
 
-// Remaining headroom below which a jetsam kill is imminent.
 inline uint64_t CriticalAvailable() {
   return std::max(kMinCriticalAvailable, MemoryCeiling() * 9 / 100);
 }

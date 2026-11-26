@@ -17,15 +17,8 @@
 
 namespace content::blinker_logging {
 
-// The boot log lives at /var/mobile/Documents/blink_boot.log — outside the app
-// container, readable by anything else on a jailbroken device, and it survives
-// across launches. A private session must never write page URLs or hosts into
-// it. The rest of each line (memory counters, frame/layer counts) still works
-// for the crash forensics the log exists for.
-//
-// Read once: Private Browsing is fixed for the life of the process, because the
-// browser context is chosen at startup and changing the setting requires a
-// restart.
+// Лог запуску переживає перезапуски, тому в приватній сесії URL і хости
+// не пишемо
 inline bool IsPrivateSession() {
 #if BUILDFLAG(IS_IOS)
   static const bool active = [] {
@@ -42,16 +35,11 @@ inline bool IsPrivateSession() {
 #endif
 }
 
-// EVERY boot-log site that formats a URL must route through this rather than
-// calling GURL::spec() directly. It lives in a shared header, not in one .cc,
-// specifically so that this is possible from any file in the shell — an earlier
-// copy was file-local to shell.cc, which meant new log sites in other files had
-// no way to honor the rule and silently leaked full URLs.
+// кожен лог з URL іде через цю функцію, не через GURL::spec()
 inline std::string LoggableURLSpec(const GURL& url) {
   return IsPrivateSession() ? std::string("[private]") : url.spec();
 }
 
-// Same rule for a bare host, which is just as identifying as a full URL.
 inline std::string LoggableHost(std::string_view host) {
   return IsPrivateSession() ? std::string("[private]") : std::string(host);
 }

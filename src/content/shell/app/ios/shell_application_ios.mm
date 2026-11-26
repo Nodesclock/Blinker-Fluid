@@ -5,6 +5,8 @@
 #import "content/shell/app/ios/shell_application_ios.h"
 
 #import <Metal/Metal.h>
+#include <algorithm>
+#include <atomic>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -13,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -21,11 +24,13 @@
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/memory/memory_pressure_listener.h"
 #include "components/crash/core/app/crashpad.h"
 #include "content/public/app/content_main.h"
 #include "content/public/app/content_main_runner.h"
 #include "content/shell/app/shell_main_delegate.h"
+#include "content/shell/browser/blinker_extension_api.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_browser_context.h"
 #include "content/shell/browser/shell_content_browser_client.h"
@@ -34,16 +39,12 @@
 #include "ui/gfx/geometry/size.h"
 
 extern "C" void BlinkPersistOpenTabs();
+extern "C" void BlinkSetPagesBackgrounded(bool backgrounded);
+extern "C" void BlinkApplyFreshStart(void);
 
-// Diagnostic file locations, resolved once in shell_main.cc (they move into the
-// app container when the install is sandboxed out of /var/mobile/Documents).
 extern "C" const char* BlinkBootLogPath();
 extern "C" const char* BlinkBootLogPrevPath();
 
-// The production paths are supplied by shell_main.cc, which is not linked into
-// unit-test executables. Keep test-only consumers linkable without duplicating
-// the container-resolution machinery; a production strong definition always
-// overrides these weak fallbacks.
 extern "C" __attribute__((weak)) const char* BlinkDocumentsDir() {
   return "/tmp";
 }
@@ -73,10 +74,6 @@ static const char** g_argv = nullptr;
 static std::unique_ptr<content::ContentMainRunner> g_main_runner;
 static std::unique_ptr<content::ShellMainDelegate> g_main_delegate;
 
-// Early startup logger. This can run before Foundation is initialized and
-// therefore uses only C runtime APIs.
-// shell_main.cc supplies the production implementation. Test executables link
-// this app delegate without shell_main, so retain a weak no-op fallback.
 extern "C" __attribute__((weak)) void BlinkArmCrashHandler(void) {}
 
 namespace {
@@ -137,7 +134,6 @@ extern "C" const char* BlinkIOSContainerDocumentsDirectory() {
   return documents_path;
 }
 
-// Persistent descriptor avoids repeated file setup on the UI thread.
 extern "C" void BlinkBootLog(const char* stage) {
   char sanitized[4096] = {};
   SanitizeBootLogLine(stage, sanitized, sizeof(sanitized));
@@ -146,7 +142,6 @@ extern "C" void BlinkBootLog(const char* stage) {
   static int log_fd = -1;
   const char* path = BlinkBootLogPath();
   if (!g_boot_log_initialized) {
-    // Preserve the previous run before truncating the current log.
     rename(path, BlinkBootLogPrevPath());
     log_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
     g_boot_log_initialized = true;
@@ -166,9 +161,6 @@ extern "C" void BlinkBootLog(const char* stage) {
   os_unfair_lock_unlock(&g_boot_log_lock);
 }
 
-// printf-style convenience over BlinkBootLog. Formats into a stack buffer and
-// forwards. Callers reach this through BLINKER_DIAGF / BLINKER_LOGF, so in a
-// release build the format string and arguments are never referenced.
 extern "C" void BlinkBootLogf(const char* format, ...) {
   char message[4096];
   va_list args;
@@ -178,13 +170,8 @@ extern "C" void BlinkBootLogf(const char* format, ...) {
   BlinkBootLog(message);
 }
 
-// Reports whether this process can obtain a Metal device. ANGLE's only iOS
-// backend is Metal and it caches the answer to its very first
-// MTLCreateSystemDefaultDevice() call for the life of the process, so a query
-// that lands while the GPU is unreachable (a sandbox denial, or a device that
-// is not yet usable this early in launch) costs us EGL, and therefore all web
-// rendering, permanently. Resolved through dlsym so nothing here adds a link
-// dependency on Metal, and typed void* to keep the +1 return away from ARC.
+// ANGLE кешує першу відповідь MTLCreateSystemDefaultDevice на весь процес
+// dlsym щоб не лінкувати Metal, void* щоб ARC не чіпав +1
 extern "C" bool BlinkIOSMetalDeviceAvailable() {
   using CreateDeviceFn = void* (*)(void);
   static CreateDeviceFn create = reinterpret_cast<CreateDeviceFn>(
@@ -200,13 +187,8 @@ extern "C" bool BlinkIOSMetalDeviceAvailable() {
   return true;
 }
 
-// Reports whether the GPU is at least Apple3 (A9), the floor ANGLE documents
-// for its Metal backend. Dawn/Graphite raises an unhandled Metal exception
-// while encoding a render pass on older parts -- an A8X iPad Air 2 aborts in
-// dawn::native::metal::CommandBuffer::EncodeRenderPass as soon as a page
-// rasterizes (GitHub issue #10) -- so those devices need the Ganesh path.
-// Unknown (no device) counts as supported: refusing Graphite over a probe that
-// merely failed would penalize every device whose GPU we could not read.
+// на A8X Dawn падає в EncodeRenderPass, тому там Ganesh
+// невідомий GPU вважаємо придатним
 extern "C" bool BlinkIOSGpuSupportsGraphite() {
   using CreateDeviceFn = void* (*)(void);
   static CreateDeviceFn create = reinterpret_cast<CreateDeviceFn>(
@@ -223,14 +205,12 @@ extern "C" bool BlinkIOSGpuSupportsGraphite() {
   if (@available(iOS 13.0, *)) {
     supported = [device supportsFamily:MTLGPUFamilyApple3];
   } else {
-    // The equivalent feature-set query is available on iOS 9.
     supported = [device supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
   }
   CFRelease(raw);
   return supported;
 }
 
-// Records exception details before SIGABRT discards the exception object.
 static void BlinkLogExceptionFrames(NSArray<NSString*>* frames) {
   NSUInteger count = MIN((NSUInteger)24, frames.count);
   for (NSUInteger i = 0; i < count; ++i) {
@@ -264,16 +244,12 @@ static void BlinkInstallExceptionHandlers() {
   BLINKER_LOG("CRASH_DIAG: ObjC/C++ exception handlers installed");
 }
 
-// Poll memory headroom because jetsam can terminate a foreground process
-// without delivering a UIKit memory warning first.
 static dispatch_source_t g_mem_watchdog_timer = nullptr;
 static bool g_mem_watchdog_suspended = false;
 static time_t g_last_critical_purge = 0;
 static bool g_mem_watchdog_low_latched = false;
 
-// Rate-limit critical pressure to avoid cache and GC thrashing.
 static const int kCriticalPurgeMinIntervalSecs = 3;
-// Remaining-memory and footprint thresholds.
 static void BlinkBootLogMemory(const char* label);
 
 static void BlinkMemoryWatchdogTick() {
@@ -312,8 +288,6 @@ static void BlinkMemoryWatchdogTick() {
     }
     g_mem_watchdog_low_latched = true;
   } else if (moderate) {
-    // Only act on the first crossing into the moderate band, not every tick,
-    // so steady-state browsing near the threshold does not GC-thrash.
     if (!g_mem_watchdog_low_latched) {
       g_mem_watchdog_low_latched = true;
       BLINKER_DIAGF("MEMWATCH: available=%lluMB footprint=%lluMB -> MODERATE",
@@ -322,17 +296,14 @@ static void BlinkMemoryWatchdogTick() {
           base::MEMORY_PRESSURE_LEVEL_MODERATE);
     }
   } else {
-    // Recovered well above the moderate band; re-arm the moderate one-shot.
     g_mem_watchdog_low_latched = false;
   }
 }
 
 static void BlinkStartMemoryWatchdog() {
   if (g_mem_watchdog_timer) {
-    // applicationDidBecomeActive may be delivered more than once without an
-    // intervening background transition (for example after Control Center or
-    // a system alert). Resuming an already-active dispatch source is a fatal
-    // libdispatch client error on iOS 12.
+    // applicationDidBecomeActive може прийти двічі без фону, а повторний resume
+    // джерела dispatch на iOS 12 фатальний
     if (g_mem_watchdog_suspended) {
       dispatch_resume(g_mem_watchdog_timer);
       g_mem_watchdog_suspended = false;
@@ -341,8 +312,8 @@ static void BlinkStartMemoryWatchdog() {
   }
   g_mem_watchdog_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
                                                 0, dispatch_get_main_queue());
-  // Poll twice per second so a fast JS/media allocation burst cannot jump from
-  // a healthy footprint to the jetsam ceiling between samples.
+  // два рази на секунду, щоб сплеск виділень JS чи медіа не проскочив до стелі
+  // jetsam
   dispatch_source_set_timer(
       g_mem_watchdog_timer,
       dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -352,8 +323,6 @@ static void BlinkStartMemoryWatchdog() {
   });
   dispatch_resume(g_mem_watchdog_timer);
   g_mem_watchdog_suspended = false;
-  // Log the budget the policy actually derived. This runs in the foreground, so
-  // os_proc_available_memory() answers here even when it did not during launch.
   BLINKER_DIAGF("MEMWATCH: watchdog started ceiling=%lluMB moderate=%lluMB "
                 "critical=%lluMB block=%lluMB",
                 content::blinker_memory::MemoryCeiling() >> 20,
@@ -397,7 +366,131 @@ static void BlinkBootLogMemory(const char* label) {
                 basic_kr, vm_kr);
 }
 
-// Mark clean background transitions so restoration can distinguish crashes.
+// в звичайний лог, бо в релізі BLINKER_DIAG вимкнено, а ці числа пояснюють
+// вбивства у фоні
+static void BlinkLogFootprint(const char* label) {
+  task_vm_info_data_t vm_info;
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO,
+                reinterpret_cast<task_info_t>(&vm_info), &count) ==
+      KERN_SUCCESS) {
+    BLINKER_LOGF("%s footprint=%lluMB", label,
+                 (unsigned long long)(vm_info.phys_footprint >> 20));
+  } else {
+    BLINKER_LOGF("%s footprint=unknown", label);
+  }
+}
+
+static UIBackgroundTaskIdentifier g_bg_task = UIBackgroundTaskInvalid;
+static int64_t g_bg_generation = 0;
+
+// iOS вбиває з 0xDEAD10CC застосунок приспаний із замками на leveldb і SQLite
+// закрити їх Chromium не дає, тому виходимо самі
+static void BlinkMarkCleanExit();
+
+static void BlinkFinishBackgroundExit(bool storage_flushed) {
+  BLINKER_LOG(storage_flushed ? "BGEXIT: extension storage flushed"
+                              : "BGEXIT: extension storage flush incomplete");
+  BlinkPersistOpenTabs();
+  BlinkMarkCleanExit();
+  // exit запускає Shutdown() поки робочі потоки живі, і падає
+  _exit(0);
+}
+
+static void BlinkFlushForBackgroundExit(int64_t generation) {
+  if (generation != g_bg_generation) {
+    return;
+  }
+  content::BlinkerFlushStorageForBackground(base::BindOnce(
+      [](int64_t generation, bool success) {
+        if (generation != g_bg_generation) {
+          return;
+        }
+        if (success) {
+          BlinkFinishBackgroundExit(true);
+          return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+                         BlinkFlushForBackgroundExit(generation);
+                       });
+      },
+      generation));
+}
+
+static void BlinkExitBeforeSuspension() {
+  const int64_t generation = g_bg_generation;
+  BlinkFlushForBackgroundExit(generation);
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   if (generation == g_bg_generation) {
+                     BlinkFinishBackgroundExit(false);
+                   }
+                 });
+}
+
+// у лог іде тільки перша помилка Dawn, після втрати пристрою їх летить тисячі
+extern "C" void BlinkGpuContextLost(const char* message, unsigned long length) {
+  static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+  if (reported.test_and_set()) {
+    return;
+  }
+  BLINKER_LOGF("GPU_ERROR: %.*s", static_cast<int>(std::min<unsigned long>(length, 300)),
+               message ? message : "");
+}
+
+static void BlinkEndBackgroundTask() {
+  if (g_bg_task != UIBackgroundTaskInvalid) {
+    [[UIApplication sharedApplication] endBackgroundTask:g_bg_task];
+    g_bg_task = UIBackgroundTaskInvalid;
+  }
+}
+
+extern "C" void BlinkCancelBackgroundExit() {
+  ++g_bg_generation;
+  BlinkEndBackgroundTask();
+}
+
+static void BlinkPurgeWithBackgroundTime() {
+  UIApplication* app = [UIApplication sharedApplication];
+  const int64_t generation = ++g_bg_generation;
+  BlinkEndBackgroundTask();
+  void (^finish)(void) = ^{
+    BlinkEndBackgroundTask();
+  };
+  g_bg_task = [app beginBackgroundTaskWithName:@"BlinkerBackgroundPurge"
+                             expirationHandler:^{
+                               BLINKER_LOG("BGPURGE: expired");
+                               if (generation == g_bg_generation) {
+                                 BlinkFinishBackgroundExit(false);
+                               }
+                               finish();
+                             }];
+  BlinkLogFootprint("BGPURGE: entering background");
+  // спершу віддаємо замки, з відкритою транзакцією SQLite чи leveldb
+  // система вбиває застосунок з кодом 0xDEAD10CC
+  content::BlinkerFlushStorageForBackground(base::BindOnce([](bool success) {
+    if (!success) {
+      BLINKER_LOG("BGPURGE: extension storage flush failed");
+    }
+  }));
+  BLINKER_LOG("BGPURGE: purging with background time");
+  base::MemoryPressureListener::NotifyMemoryPressure(
+      base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   if (generation == g_bg_generation) {
+                     BlinkLogFootprint("BGPURGE: after purge");
+                   }
+                 });
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   if (generation == g_bg_generation) {
+                     BlinkExitBeforeSuspension();
+                   }
+                 });
+}
+
 static void BlinkMarkCleanExit() {
   NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
   [d setObject:@"clean_exit" forKey:@"BlinkLaunchState"];
@@ -413,6 +506,7 @@ static void BlinkClearRestoreGuard() {
   }
 }
 
+// проба взведена всю сесію, бо збій JIT буває і за хвилину після старту
 static void BlinkClearJITTierProbe() {
   NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
   if ([d objectForKey:@"BlinkJITTierProbe"] &&
@@ -429,23 +523,106 @@ extern "C" void BlinkPrepareForRestart() {
   BlinkMarkCleanExit();
 }
 
-// The probe used to be disarmed on a 20-second timer, on the assumption that
-// generated code either works immediately or not at all. It does not: a tier-4
-// SIGSEGV inside worker-thread JIT arrived ~90 seconds into a session, long
-// after the timer had cleared the probe, so the ladder never demoted and the
-// same crash repeated on every launch. Keep the probe armed for the whole
-// session and clear it only on a clean background, so any codegen fault demotes
-// once. Unrelated failures still cannot ratchet the engine down: the crash
-// signal has to be SIGILL/SIGBUS/SIGSEGV/SIGTRAP, which excludes an uncaught
-// ObjC exception (SIGABRT) and a jetsam SIGKILL (no handler, no signal file).
+// без extended virtual addressing (безкоштовний підпис SideStore, AltStore,
+// ESign)
+// iOS не дає 4 ГБ адрес і V8 з pointer compression падає на старті
+static BOOL g_blink_no_address_space = NO;
+static UIWindow* g_blink_notice_window = nil;
+
+static bool BlinkCanReserveV8Cage() {
+#if defined(BLINKER_V8_POINTER_CAGE)
+  constexpr size_t kCageSize = size_t{4} << 30;
+  void* probe = mmap(nullptr, kCageSize, PROT_NONE, MAP_PRIVATE | MAP_ANON,
+                     -1, 0);
+  if (probe == MAP_FAILED) {
+    return false;
+  }
+  munmap(probe, kCageSize);
+#endif
+  return true;
+}
+
+@interface BlinkerAddressSpaceNotice : UIViewController
+@end
+
+@implementation BlinkerAddressSpaceNotice
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.view.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1.0];
+  UILabel* title = [[UILabel alloc] init];
+  title.text = @"Blinker Fluid can't start here";
+  title.font = [UIFont boldSystemFontOfSize:22];
+  title.textColor = UIColor.whiteColor;
+  title.numberOfLines = 0;
+  UILabel* body = [[UILabel alloc] init];
+  body.text =
+      @"This copy was signed without the \"extended virtual addressing\" "
+      @"entitlement, which free Apple ID signing (SideStore, AltStore, ESign "
+      @"and similar) cannot add. The JavaScript engine needs that address "
+      @"space and would crash at launch.\n\nTo run Blinker Fluid, install it "
+      @"with TrollStore or on a jailbroken device, sign it with a paid "
+      @"developer certificate, or use the LiveContainer build from the "
+      @"releases page.";
+  body.font = [UIFont systemFontOfSize:16];
+  body.textColor = [UIColor colorWithWhite:0.85 alpha:1.0];
+  body.numberOfLines = 0;
+  UIButton* open = [UIButton buttonWithType:UIButtonTypeSystem];
+  [open setTitle:@"Open releases page" forState:UIControlStateNormal];
+  open.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+  [open addTarget:self
+                action:@selector(openReleases)
+      forControlEvents:UIControlEventTouchUpInside];
+  UIStackView* stack =
+      [[UIStackView alloc] initWithArrangedSubviews:@[ title, body, open ]];
+  stack.axis = UILayoutConstraintAxisVertical;
+  stack.spacing = 18;
+  stack.alignment = UIStackViewAlignmentLeading;
+  stack.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:stack];
+  UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:@[
+    [stack.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
+                                        constant:24],
+    [stack.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor
+                                         constant:-24],
+    [stack.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
+  ]];
+}
+
+- (void)openReleases {
+  NSURL* url = [NSURL
+      URLWithString:@"https://github.com/Nodesclock/Blinker-Fluid/releases"];
+  [UIApplication.sharedApplication openURL:url
+                                   options:@{}
+                         completionHandler:nil];
+}
+@end
+
+static void BlinkShowAddressSpaceNotice(UIScene* scene) {
+  UIWindow* window = nil;
+  if (@available(iOS 13.0, *)) {
+    if ([scene isKindOfClass:[UIWindowScene class]]) {
+      window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
+    }
+  }
+  if (!window) {
+    window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+  }
+  window.rootViewController = [[BlinkerAddressSpaceNotice alloc] init];
+  [window makeKeyAndVisible];
+  g_blink_notice_window = window;
+}
 
 @implementation ShellAppSceneDelegate
 
 - (void)scene:(UIScene*)scene
     willConnectToSession:(UISceneSession*)session
                  options:(UISceneConnectionOptions*)connectionOptions {
+  if (g_blink_no_address_space) {
+    BlinkShowAddressSpaceNotice(scene);
+    return;
+  }
   BLINKER_DIAG("D: scene willConnectToSession (window setup)");
-  // Attach the primary browser window to the reconnecting scene.
   if (content::Shell::windows().empty()) {
     return;
   }
@@ -460,15 +637,12 @@ extern "C" void BlinkPrepareForRestart() {
   UIViewController* controller = window.rootViewController;
   window.rootViewController = nil;
   window.windowScene = (UIWindowScene*)scene;
-  // Respect the scene bounds for iPad multitasking.
   if ([scene isKindOfClass:[UIWindowScene class]]) {
     window.frame = ((UIWindowScene*)scene).coordinateSpace.bounds;
   }
   window.rootViewController = controller;
   [window makeKeyAndVisible];
   BLINKER_DIAG("E: makeKeyAndVisible done (window on screen)");
-  // Re-arm our crash handler AFTER Chromium installed its own during startup,
-  // so the post-startup crash (in the render/compositing path) hits our logger.
   if (BlinkArmCrashHandler) {
     BlinkArmCrashHandler();
   }
@@ -476,44 +650,51 @@ extern "C" void BlinkPrepareForRestart() {
 }
 
 - (void)sceneWillEnterForeground:(UIScene*)scene {
+  if (g_blink_no_address_space) {
+    return;
+  }
+  BlinkCancelBackgroundExit();
+  BlinkSetPagesBackgrounded(false);
+  [[NSUserDefaults standardUserDefaults] setObject:@"running"
+                                            forKey:@"BlinkLaunchState"];
+  [[NSUserDefaults standardUserDefaults] synchronize];
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kEnableCrashReporter)) {
     ::crash_reporter::ProcessIntermediateDumps();
   }
-  // This is a scene-based app, so the UIApplication-level active/background
-  // callbacks are not delivered — start the proactive OOM watchdog here, where
-  // the process is foreground (os_proc_available_memory() only reports then).
+  // застосунок на сценах не отримує колбеків UIApplication, тому сторож пам'яті
+  // стартує тут
   BlinkStartMemoryWatchdog();
-  // Second Metal reading, now that the scene is foreground. Paired with the
-  // GPUMETAL line the GPU thread writes during launch this separates the two
-  // causes of a dead EGL display: still unavailable here means the process is
-  // denied the GPU outright, available here means we merely asked too early.
   BLINKER_DIAG(BlinkIOSMetalDeviceAvailable()
                    ? "GPUMETAL_FG: device available at foreground"
                    : "GPUMETAL_FG: device UNAVAILABLE at foreground");
 }
 
 - (void)sceneDidEnterBackground:(UIScene*)scene {
-  // Scene-based clean background — disarm the tab-restore crash guard (see
-  // BlinkClearRestoreGuard). A crash in the foreground never reaches here.
+  if (g_blink_no_address_space) {
+    return;
+  }
   BlinkClearRestoreGuard();
   BlinkClearJITTierProbe();
   BlinkPersistOpenTabs();
   BlinkMarkCleanExit();
-  // Backgrounded apps are jetsam-reaped first: purge now and stop polling.
-  base::MemoryPressureListener::NotifyMemoryPressure(
-      base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+  BlinkSetPagesBackgrounded(true);
+  BlinkPurgeWithBackgroundTime();
   BlinkStopMemoryWatchdog();
 }
 
 - (void)sceneWillResignActive:(UIScene*)scene {
-  // The app switcher can terminate a suspended process without delivering
-  // sceneDidEnterBackground, so save as soon as the scene loses focus.
+  if (g_blink_no_address_space) {
+    return;
+  }
+  // App switcher може вбити приспаний процес без sceneDidEnterBackground,
+  // тому зберігаємо щойно сцена втратила фокус
   BlinkPersistOpenTabs();
+  BlinkLogFootprint("BGPURGE: resign active");
+  base::MemoryPressureListener::NotifyMemoryPressure(
+      base::MEMORY_PRESSURE_LEVEL_MODERATE);
 }
 
-// iPad multitasking: keep each window sized to its scene as the user drags the
-// Split View divider, resizes a Stage Manager window, or rotates the device.
 - (void)windowScene:(UIWindowScene*)windowScene
     didUpdateCoordinateSpace:(id<UICoordinateSpace>)previousCoordinateSpace
         interfaceOrientation:
@@ -549,9 +730,36 @@ extern "C" void BlinkPrepareForRestart() {
 - (BOOL)application:(UIApplication*)application
     willFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
   BLINKER_DIAG("B: willFinishLaunching (pre RunContentProcess)");
-  // Installed before any Chromium/UIKit work so an exception thrown during
-  // startup is still named rather than surfacing as a bare SIGABRT.
   BlinkInstallExceptionHandlers();
+  BlinkApplyFreshStart();
+  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+  NSString* deferredHomepage = nil;
+  if (![defaults boolForKey:@"BlinkPrivateBrowsing"]) {
+    if (![[defaults arrayForKey:@"BlinkPendingCrashTabs"] count] &&
+        ([[defaults stringForKey:@"BlinkLaunchState"]
+             isEqualToString:@"running"] ||
+         [defaults boolForKey:@"BlinkRestoreGuard"])) {
+      NSArray* tabs = [defaults arrayForKey:@"BlinkOpenTabs"];
+      if (tabs.count) {
+        [defaults setObject:tabs forKey:@"BlinkPendingCrashTabs"];
+      }
+    }
+    if ([[defaults arrayForKey:@"BlinkPendingCrashTabs"] count]) {
+      [defaults removeObjectForKey:@"BlinkOpenTabs"];
+      deferredHomepage = [defaults stringForKey:@"BlinkCrashHomepage"]
+                             ?: [defaults stringForKey:@"BlinkHomepage"];
+      if (deferredHomepage) {
+        [defaults setObject:deferredHomepage forKey:@"BlinkCrashHomepage"];
+      }
+      [defaults removeObjectForKey:@"BlinkHomepage"];
+      [defaults synchronize];
+    }
+  }
+  if (!BlinkCanReserveV8Cage()) {
+    g_blink_no_address_space = YES;
+    BLINKER_LOG("ADDRESS_SPACE: no room for the V8 cage, Chromium not started");
+    return YES;
+  }
   g_main_delegate = std::make_unique<content::ShellMainDelegate>();
   content::ContentMainParams params(g_main_delegate.get());
   params.argc = g_argc;
@@ -559,6 +767,11 @@ extern "C" void BlinkPrepareForRestart() {
   g_main_runner = content::ContentMainRunner::Create();
   BLINKER_DIAG("B2: ContentMainRunner created, calling RunContentProcess");
   content::RunContentProcess(std::move(params), g_main_runner.get());
+  if (deferredHomepage) {
+    [defaults setObject:deferredHomepage forKey:@"BlinkHomepage"];
+    [defaults removeObjectForKey:@"BlinkCrashHomepage"];
+    [defaults synchronize];
+  }
   BLINKER_DIAG("C: RunContentProcess returned");
   if (BlinkArmCrashHandler) {
     BlinkArmCrashHandler();
@@ -568,9 +781,15 @@ extern "C" void BlinkPrepareForRestart() {
 
 - (BOOL)application:(UIApplication*)application
     didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
+  if (g_blink_no_address_space) {
+    if (!@available(iOS 13.0, *)) {
+      BlinkShowAddressSpaceNotice(nil);
+    }
+    return YES;
+  }
   if (!@available(iOS 13.0, *)) {
-    // iOS 12 predates scenes, so attach Chromium's already-created window via
-    // the classic application delegate.
+    // на iOS 12 сцен ще нема, вікно Chromium чіпляємо через application
+    // delegate
     if (!content::Shell::windows().empty()) {
       UIWindow* window = content::Shell::windows()[0]->window().Get();
       if (window) {
@@ -587,14 +806,18 @@ extern "C" void BlinkPrepareForRestart() {
 }
 
 - (void)applicationWillResignActive:(UIApplication*)application {
+  if (g_blink_no_address_space) {
+    return;
+  }
   if (!@available(iOS 13.0, *)) {
     BlinkPersistOpenTabs();
   }
 }
 
 - (void)applicationDidEnterBackground:(UIApplication*)application {
-  // Clean background => the app did not crash this session; safe to restore
-  // tabs next launch.
+  if (g_blink_no_address_space) {
+    return;
+  }
   BlinkClearRestoreGuard();
   BlinkClearJITTierProbe();
   if (!@available(iOS 13.0, *)) {
@@ -602,15 +825,17 @@ extern "C" void BlinkPrepareForRestart() {
     BlinkStopMemoryWatchdog();
   }
   BlinkMarkCleanExit();
-  // Backgrounded apps are the first thing iOS jetsam-kills under memory
-  // pressure. Purge now so a backgrounded tab is far less likely to be reaped
-  // (which would otherwise look like a "crash" when the user returns).
-  base::MemoryPressureListener::NotifyMemoryPressure(
-      base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+  // для chrome.idle на телефоні відхід користувача це вихід у фон
+  // від цього залежить автоблокування менеджерів паролів
+  content::BlinkerSetBrowserBackgrounded(true);
+  BlinkSetPagesBackgrounded(true);
+  BlinkPurgeWithBackgroundTime();
 }
 
-// Forward UIKit warnings to Chromium's memory-pressure system.
 - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
+  if (g_blink_no_address_space) {
+    return;
+  }
   BlinkBootLogMemory("before UIKit memory warning purge");
   BLINKER_LOG("MEMWARN: UIKit memory warning -> NotifyMemoryPressure CRITICAL");
   base::MemoryPressureListener::NotifyMemoryPressure(
@@ -619,9 +844,21 @@ extern "C" void BlinkPrepareForRestart() {
 }
 
 - (void)applicationWillEnterForeground:(UIApplication*)application {
+  if (g_blink_no_address_space) {
+    return;
+  }
+  BlinkCancelBackgroundExit();
+  BlinkSetPagesBackgrounded(false);
+  [[NSUserDefaults standardUserDefaults] setObject:@"running"
+                                            forKey:@"BlinkLaunchState"];
+  [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)applicationDidBecomeActive:(UIApplication*)application {
+  if (g_blink_no_address_space) {
+    return;
+  }
+  content::BlinkerSetBrowserBackgrounded(false);
   if (!@available(iOS 13.0, *)) {
     BlinkStartMemoryWatchdog();
     BLINKER_DIAG(BlinkIOSMetalDeviceAvailable()
@@ -631,18 +868,21 @@ extern "C" void BlinkPrepareForRestart() {
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
+  if (g_blink_no_address_space) {
+    return;
+  }
+  BlinkClearRestoreGuard();
+  BlinkPersistOpenTabs();
   BlinkMarkCleanExit();
 }
 
 - (BOOL)application:(UIApplication*)application
     shouldSaveSecureApplicationState:(NSCoder*)coder {
-  // Tab restoration is handled by the browser's lightweight session model.
   return NO;
 }
 
 - (BOOL)application:(UIApplication*)application
     shouldRestoreSecureApplicationState:(NSCoder*)coder {
-  // UIKit restoration conflicts with the browser's session model.
   return NO;
 }
 

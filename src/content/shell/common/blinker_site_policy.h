@@ -6,12 +6,11 @@
 #define CONTENT_SHELL_COMMON_BLINKER_SITE_POLICY_H_
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace content::blinker_sites {
 
-// Hosts supplied by GURL are canonical ASCII. Match complete labels so an
-// unrelated suffix or lookalike cannot inherit a site's policy.
 inline bool HostMatchesDomain(std::string_view host, std::string_view domain) {
   if (host.ends_with('.')) {
     host.remove_suffix(1);
@@ -19,6 +18,36 @@ inline bool HostMatchesDomain(std::string_view host, std::string_view domain) {
   return host == domain ||
          (host.size() > domain.size() && host.ends_with(domain) &&
           host[host.size() - domain.size() - 1] == '.');
+}
+
+// m.site і mobile.site самі не переходять на десктоп навіть з десктопним UA
+// Без крапки після префікса не чіпаєм, mobile.de це сам сайт
+inline std::string DesktopHost(std::string_view host) {
+  if (host == "m.youtube.com") {
+    return "www.youtube.com";
+  }
+  for (std::string_view prefix : {"m.", "mobile."}) {
+    if (host.starts_with(prefix) &&
+        host.substr(prefix.size()).find('.') != std::string_view::npos) {
+      return std::string(host.substr(prefix.size()));
+    }
+  }
+  if (const size_t infix = host.find(".m.");
+      infix != std::string_view::npos &&
+      host.substr(infix + 3).find('.') != std::string_view::npos) {
+    return std::string(host.substr(0, infix)) +
+           std::string(host.substr(infix + 2));
+  }
+  return std::string(host);
+}
+
+inline std::string SiteModePreferenceHost(std::string_view host) {
+  if (host.starts_with("www.") &&
+      host.substr(4).find('.') != std::string_view::npos) {
+    host.remove_prefix(4);
+  }
+  return DesktopHost(host) == "www.youtube.com" ? std::string("youtube.com")
+                                                 : DesktopHost(host);
 }
 
 enum SiteTrait : uint32_t {
@@ -36,8 +65,6 @@ struct SitePolicy {
   uint32_t traits;
 };
 
-// The memory, keyboard, restore, and request exemptions remain independent.
-// A site being heavy does not imply that it needs a keyboard fallback.
 inline constexpr SitePolicy kSitePolicies[] = {
     {"reddit.com", true, kHeavy | kSkipSessionRestore},
     {"youtube.com", true, kHeavy},

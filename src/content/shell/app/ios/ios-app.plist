@@ -61,6 +61,8 @@
 	<string>Allow Blinker Fluid access to camera</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Allow Blinker Fluid to choose photos and videos for uploads</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Allow Blinker Fluid to save images you choose to Photos</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Use Face ID to unlock your private Blinker Fluid session</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
@@ -80,6 +82,16 @@
 				<string>AppIcon60x60</string>
 			</array>
 		</dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>ChromiumBlue</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>ChromiumIcon60x60</string>
+				</array>
+			</dict>
+		</dict>
 	</dict>
 	<key>CFBundleIcons~ipad</key>
 	<dict>
@@ -90,6 +102,17 @@
 				<string>AppIcon60x60</string>
 				<string>AppIcon76x76</string>
 			</array>
+		</dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>ChromiumBlue</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>ChromiumIcon60x60</string>
+					<string>ChromiumIcon76x76</string>
+				</array>
+			</dict>
 		</dict>
 	</dict>
 </dict>

@@ -23,6 +23,7 @@
 #include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/cpu.h"
+#include "base/dcheck_is_on.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/logging.h"
@@ -31,7 +32,6 @@
 #include "base/path_service.h"
 #include "base/process/current_process.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/trace_event/trace_log.h"
 #include "build/build_config.h"
 #if BUILDFLAG(IS_IOS)
 #include <CoreFoundation/CoreFoundation.h>
@@ -40,11 +40,13 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "base/mac/code_signature_spi.h"
 #include "content/shell/common/blinker_diagnostics.h"
 #include "content/shell/common/blinker_memory_policy.h"
+#include "content/shell/common/blinker_proxy_config.h"
 #endif
 #include "components/crash/core/common/crash_key.h"
 #include "components/memory_system/initializer.h"
@@ -109,9 +111,7 @@
 
 #if BUILDFLAG(IS_IOS)
 #include "content/shell/app/ios/shell_application_ios.h"
-// Defined by the shell app delegate; absent from non-shell iOS targets.
 extern "C" __attribute__((weak)) bool BlinkIOSGpuSupportsGraphite();
-// Diagnostic file locations, resolved once in shell_main.cc.
 extern "C" const char* BlinkBootLogPath();
 extern "C" const char* BlinkCrashSignalPath();
 extern "C" const char* BlinkFullLogPath();
@@ -129,6 +129,7 @@ namespace {
 enum class LoggingDest {
   kFile,
   kStderr,
+  kSystem,
 #if BUILDFLAG(IS_WIN)
   kHandle,
 #endif
@@ -151,8 +152,27 @@ void JitProbeSignalHandler(int signal) {
   siglongjmp(g_jit_probe_jmp, 1);
 }
 
+// на iOS 17+ з монітором підпису mprotect може дати успіх, а сторінка без
+// execute
+// тоді SIGKILL з CODESIGNING Invalid Page, обробник його не ловить
+bool IOSPageIsExecutable(const void* page) {
+  vm_address_t address = reinterpret_cast<vm_address_t>(page);
+  vm_size_t size = 0;
+  vm_region_basic_info_data_64_t info = {};
+  mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name = MACH_PORT_NULL;
+  const kern_return_t kr = vm_region_64(
+      mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64,
+      reinterpret_cast<vm_region_info_t>(&info), &count, &object_name);
+  if (object_name != MACH_PORT_NULL) {
+    mach_port_deallocate(mach_task_self(), object_name);
+  }
+  return kr == KERN_SUCCESS &&
+         address <= reinterpret_cast<vm_address_t>(page) &&
+         (info.protection & VM_PROT_EXECUTE) != 0;
+}
 
-// Verifies that an RX page can be committed inside a PROT_NONE reservation.
+
 bool ProbeIOSCodeRangePatternExecutableMemory() {
 #if defined(__aarch64__) || defined(__arm64__)
   const size_t page_size = static_cast<size_t>(getpagesize());
@@ -179,6 +199,11 @@ bool ProbeIOSCodeRangePatternExecutableMemory() {
 
   if (mprotect(code, page_size, PROT_READ | PROT_EXEC) != 0) {
     BLINKER_DIAGF("JITPROBE_RANGE_FAIL: RW->RX errno=%d (%s)\n", errno, strerror(errno));
+    munmap(reservation, reservation_size);
+    return false;
+  }
+  if (!IOSPageIsExecutable(code)) {
+    BLINKER_DIAG("JITPROBE_RANGE_FAIL: RX page is not executable\n");
     munmap(reservation, reservation_size);
     return false;
   }
@@ -215,7 +240,6 @@ bool ProbeIOSCodeRangePatternExecutableMemory() {
 #endif
 }
 
-// Verifies whether this process can execute a writable page.
 bool ProbeIOSRwxExecutableMemory() {
 #if defined(__aarch64__) || defined(__arm64__)
   const size_t page_size = static_cast<size_t>(getpagesize());
@@ -270,7 +294,6 @@ bool ProbeIOSRwxExecutableMemory() {
 #endif
 }
 
-// Verifies the RX execution view and RW mirror used by the iOS JIT.
 bool ProbeIOSDualMappingExecutableMemory() {
 #if defined(__aarch64__) || defined(__arm64__)
   BLINKER_DIAG("JITPROBE_DUAL0: entry\n");
@@ -296,7 +319,6 @@ bool ProbeIOSDualMappingExecutableMemory() {
     return false;
   }
 
-  // Ensure the mirror is writable (some kernels hand back a narrower cur_prot).
   if (mprotect(reinterpret_cast<void*>(mirror), page_size,
                PROT_READ | PROT_WRITE) != 0) {
     BLINKER_DIAGF("JITPROBE_DUAL_FAIL: mirror mprotect RW errno=%d (%s)\n", errno, strerror(errno));
@@ -322,7 +344,6 @@ bool ProbeIOSDualMappingExecutableMemory() {
 
   bool ok_first = false, ok_second = false;
 
-  // Write #1 via the mirror: mov w0, #42; ret.
   mirror_code[0] = 0x52800540;
   mirror_code[1] = 0xd65f03c0;
   __builtin___clear_cache(static_cast<char*>(rx),
@@ -335,9 +356,9 @@ bool ProbeIOSDualMappingExecutableMemory() {
   }
   BLINKER_DIAG("JITPROBE_DUAL3: first execute returned\n");
 
-  // Overwrite via the mirror while the RX view stays executable the whole time:
-  // mov w0, #43; ret. This is the live-code-patch case that kills the flip.
-  mirror_code[0] = 0x52800560;  // mov w0, #43
+  // перезапис через дзеркало, поки RX лишається виконуваним
+  // на цьому ламався варіант з перемиканням прав
+  mirror_code[0] = 0x52800560;
   mirror_code[1] = 0xd65f03c0;
   __builtin___clear_cache(static_cast<char*>(rx),
                           static_cast<char*>(rx) + 8);
@@ -379,7 +400,6 @@ bool ProbeIOSBasicExecutableMemory() {
       return false;
     }
 
-    // ARM64: mov w0, #42; ret
     const uint32_t tiny_function[] = {0x52800540, 0xd65f03c0};
     memcpy(code, tiny_function, sizeof(tiny_function));
     __builtin___clear_cache(static_cast<char*>(code),
@@ -388,6 +408,11 @@ bool ProbeIOSBasicExecutableMemory() {
     if (mprotect(code, page_size, PROT_READ | PROT_EXEC) != 0) {
       const int saved_errno = errno;
       BLINKER_DIAGF("JITPROBE_FAIL: %s mprotect RX errno=%d (%s)\n", label, saved_errno, strerror(saved_errno));
+      munmap(code, page_size);
+      return false;
+    }
+    if (!IOSPageIsExecutable(code)) {
+      BLINKER_DIAGF("JITPROBE_FAIL: %s RX page is not executable\n", label);
       munmap(code, page_size);
       return false;
     }
@@ -427,12 +452,8 @@ bool ProbeIOSBasicExecutableMemory() {
     return ok;
   };
 
-  // Do not probe MAP_JIT here. On TrollStore + Dopamine 3 the entitlement is
-  // accepted during install, but the MAP_JIT mmap can terminate the process in
-  // the kernel instead of returning MAP_FAILED, so no signal handler or fallback
-  // can recover. Jailbroken devices already expose the safer RW->RX and
-  // dual-mapped W^X paths that Blinker uses for generated code. Probe that path
-  // directly; stock environments simply receive EPERM and select jitless mode.
+  // MAP_JIT не перевіряємо, на TrollStore з Dopamine 3 такий mmap може вбити
+  // процес у ядрі
   BLINKER_DIAG(
       "JITPROBE_INFO: skipping fatal-prone MAP_JIT probe; testing plain W^X\n");
   bool ok = try_executable_page("plain", MAP_PRIVATE | MAP_ANON);
@@ -460,7 +481,6 @@ bool IsIOSProcessCSDebugged() {
   return (status & kCSDebugged) != 0;
 }
 
-// Requests CS_DEBUGGED through Dopamine. The caller verifies it with csops().
 void TryEnableJITViaJailbreak() {
   void* handle =
       dlopen("/var/jb/basebin/libjailbreak.dylib", RTLD_NOW | RTLD_LOCAL);
@@ -489,10 +509,8 @@ bool IsIOSJITBundle() {
   if (!bundle_id) {
     return false;
   }
-  // Free-signing tools append a team-specific component to the requested
-  // identifier (for example `.jit.98MXA9GAM8`).  Treat `jit` as a complete
-  // bundle-ID component instead of requiring it to remain the final suffix.
-  // Stable identifiers contain no such component and remain jitless.
+  // інструменти безкоштовного підпису дописують компонент команди до bundle id,
+  // тому `jit` шукаємо як окремий компонент
   CFArrayRef components =
       CFStringCreateArrayBySeparatingStrings(kCFAllocatorDefault, bundle_id,
                                              CFSTR("."));
@@ -524,8 +542,8 @@ bool IsIOSRuntimeJITAuthorized() {
                          ? "JIT_AUTH: CS_DEBUGGED already set at launch\n"
                          : "JIT_AUTH: CS_DEBUGGED not set at launch\n");
 
-  // Dopamine also clears code-signing restrictions not represented by
-  // CS_DEBUGGED, so request authorization even when the bit is already set.
+  // Dopamine знімає і ті обмеження яких нема в CS_DEBUGGED, тому просимо навіть
+  // коли біт стоїть
   TryEnableJITViaJailbreak();
 
   if (IsIOSProcessCSDebugged()) {
@@ -539,8 +557,6 @@ bool IsIOSRuntimeJITAuthorized() {
   return false;
 }
 
-// Runtime-selectable JIT tiers. A startup guard demotes a tier after a
-// code-generation fault so the app remains launchable.
 enum IOSJitTier {
   kTierJitless = 0,
   kTierInterpreter = 1,
@@ -568,16 +584,13 @@ const char* IOSJitTierName(int tier) {
 const char* IOSJitTierV8Flags(int tier) {
   switch (tier) {
     case kTierJitless:
-      // Bytecode is the executable form when there is no codegen, so flushing
-      // it does not shed a cheap cache -- getting the function back costs a
-      // reparse and a recompile, and that is the dominant cost on this tier.
-      // Six GCs is tuned for a build that can tier up and re-optimize; hold on
-      // longer here. Still bounded, so memory pressure eventually reclaims it.
+      // без кодогенерації байткод і є виконуваною формою, компілювати його
+      // знову дорого
+      // тому тримаємо довше ніж шість GC, але обмежено
       return "--jitless --wasm-jitless --bytecode-old-age=24";
     case kTierInterpreter:
       return "--no-sparkplug --regexp-interpret-all --wasm-jitless "
              "--disable-optimizing-compilers";
-    // Keep code generation deterministic on the iOS mirror implementation.
     case kTierBaseline:
       return "--sparkplug --regexp-interpret-all --wasm-jitless "
              "--disable-optimizing-compilers";
@@ -612,9 +625,6 @@ void WriteIOSPrefInt(CFStringRef key, int value) {
   CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
 }
 
-// Reads and clears the fatal signal recorded by BlinkCrashHandler on the
-// previous launch. Returns 0 if the last run left no record (a clean exit, or a
-// jetsam SIGKILL, which runs no handler at all).
 int TakeLastCrashSignal() {
   const char* kPath = BlinkCrashSignalPath();
   int fd = open(kPath, O_RDONLY);
@@ -631,16 +641,68 @@ int TakeLastCrashSignal() {
   return atoi(buf);
 }
 
-// Selects the tier and arms its crash guard. Interpreter tiers do not generate
-// code and therefore do not participate in the guard.
+std::string IOSBundleVersion() {
+  CFTypeRef value = CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(),
+                                                         kCFBundleVersionKey);
+  char buf[64] = {0};
+  if (value && CFGetTypeID(value) == CFStringGetTypeID()) {
+    CFStringGetCString(static_cast<CFStringRef>(value), buf, sizeof(buf),
+                       kCFStringEncodingUTF8);
+  }
+  return buf;
+}
+
+std::string ReadIOSPrefString(CFStringRef key) {
+  std::string out;
+  if (CFPropertyListRef pv =
+          CFPreferencesCopyAppValue(key, kCFPreferencesCurrentApplication)) {
+    char buf[64] = {0};
+    if (CFGetTypeID(pv) == CFStringGetTypeID() &&
+        CFStringGetCString(static_cast<CFStringRef>(pv), buf, sizeof(buf),
+                           kCFStringEncodingUTF8)) {
+      out = buf;
+    }
+    CFRelease(pv);
+  }
+  return out;
+}
+
+void WriteIOSPrefString(CFStringRef key, const std::string& value) {
+  CFStringRef str = CFStringCreateWithCString(kCFAllocatorDefault,
+                                              value.c_str(),
+                                              kCFStringEncodingUTF8);
+  CFPreferencesSetAppValue(key, str, kCFPreferencesCurrentApplication);
+  CFRelease(str);
+}
+
 int ResolveIOSJitTier(bool coderange_execution_available) {
   int tier = ReadIOSPrefInt(CFSTR("BlinkJITTier"), kDefaultIOSJitTier);
   tier = std::clamp(tier, static_cast<int>(kTierJitless),
                     static_cast<int>(kTierMax));
 
-  // Generated-code tiers require executable pages inside a reserved code range.
-  // The iOS W^X implementation keeps the executable view RX and writes through
-  // its RW mirror, so RWX capability is not required.
+  const std::string build = IOSBundleVersion();
+  const std::string guard_build =
+      ReadIOSPrefString(CFSTR("BlinkJITTierGuardBuild"));
+  bool restored_now = false;
+  if ((!guard_build.empty() && guard_build != build) ||
+      (guard_build.empty() && tier == kTierJitless)) {
+    restored_now = true;
+    const int restored = std::clamp(
+        ReadIOSPrefInt(CFSTR("BlinkJITTierBeforeGuard"), kDefaultIOSJitTier),
+        static_cast<int>(kTierInterpreter), static_cast<int>(kTierMax));
+    BLINKER_DIAGF("JIT_TIER_RESTORED: tier %d came from the crash guard on "
+                  "build '%s'; this is '%s', back to tier %d (%s)\n",
+                  tier, guard_build.c_str(), build.c_str(), restored,
+                  IOSJitTierName(restored));
+    tier = restored;
+    WriteIOSPrefInt(CFSTR("BlinkJITTier"), tier);
+    CFPreferencesSetAppValue(CFSTR("BlinkJITTierGuardBuild"), nullptr,
+                             kCFPreferencesCurrentApplication);
+    CFPreferencesSetAppValue(CFSTR("BlinkJITTierBeforeGuard"), nullptr,
+                             kCFPreferencesCurrentApplication);
+  }
+  const int stored_tier = tier;
+
   if (!coderange_execution_available && tier > kTierInterpreter) {
     BLINKER_DIAGF("JIT_TIER_CAPPED: tier %d (%s) needs executable code-range pages, "
              "which this OS refuses; running tier %d (%s)\n", tier, IOSJitTierName(tier), static_cast<int>(kTierInterpreter), IOSJitTierName(kTierInterpreter));
@@ -648,11 +710,17 @@ int ResolveIOSJitTier(bool coderange_execution_available) {
   }
 
   const int pending = ReadIOSPrefInt(CFSTR("BlinkJITTierProbe"), -1);
-  if (pending >= 0) {
+  if (restored_now) {
+    TakeLastCrashSignal();
+  } else if (pending >= 0) {
     const int sig = TakeLastCrashSignal();
     const bool codegen_fault = sig == SIGILL || sig == SIGBUS ||
                                sig == SIGSEGV || sig == SIGTRAP;
     if (codegen_fault) {
+      if (guard_build.empty()) {
+        WriteIOSPrefInt(CFSTR("BlinkJITTierBeforeGuard"), stored_tier);
+      }
+      WriteIOSPrefString(CFSTR("BlinkJITTierGuardBuild"), build);
       const int downgraded = std::max(0, std::min(pending, tier) - 1);
       BLINKER_DIAGF("JIT_TIER_DOWNGRADE: tier %d (%s) died with signal %d; falling "
                "back to tier %d (%s)\n", pending, IOSJitTierName(pending), sig, downgraded, IOSJitTierName(downgraded));
@@ -665,34 +733,32 @@ int ResolveIOSJitTier(bool coderange_execution_available) {
   }
 
   WriteIOSPrefInt(CFSTR("BlinkJITTierProbe"),
-                  tier >= kTierBaseline ? tier : -1);
+                  tier >= kTierInterpreter ? tier : -1);
   return tier;
 }
 
-// V8 fixes heap flags during startup, before foreground memory headroom is
-// available, so size the heap from installed RAM.
+// V8 фіксує прапорці купи на старті, тому розмір беремо від встановленої RAM
 std::string IOSV8HeapFlags() {
   const uint64_t ram_mb =
       content::blinker_memory::DevicePhysicalMemory() / (1024 * 1024);
   int old_space_mb = 256;
   int semi_space_mb = 8;
-  if (ram_mb >= 5500) {  // 6GB and up: 13 Pro, 14 Pro, 15 Pro, ...
+  if (ram_mb >= 5500) {
     old_space_mb = 512;
     semi_space_mb = 16;
-  } else if (ram_mb >= 3500) {  // 4GB: 11 Pro, 12, 13, SE3, ...
+  } else if (ram_mb >= 3500) {
     old_space_mb = 384;
     semi_space_mb = 16;
-  } else if (ram_mb < 1500) {  // 1GB: iPhone 5s/6/6 Plus.
-    // Leave room for decoded media frames and compositor surfaces. A 256MB
-    // old-space ceiling on a 1GB device lets one script-heavy tab consume most
-    // of the process's practical jetsam budget before V8 starts collecting.
+  } else if (ram_mb < 1500) {
+    // лишаємо місце для кадрів медіа і поверхонь компоситора
+    // з 256MB old space одна важка вкладка на 1GB з'їдає майже весь бюджет
+    // jetsam
     old_space_mb = 160;
     semi_space_mb = 4;
   }
   char buf[96];
-  snprintf(buf, sizeof(buf),
-           "--max-old-space-size=%d --max-semi-space-size=%d", old_space_mb,
-           semi_space_mb);
+  snprintf(buf, sizeof(buf), "--max-old-space-size=%d --max-semi-space-size=%d",
+           old_space_mb, semi_space_mb);
   return std::string(buf);
 }
 #endif  // BUILDFLAG(IS_IOS)
@@ -717,14 +783,18 @@ const GUID kContentShellProviderName = {
 void InitLogging(const base::CommandLine& command_line) {
   LoggingDest dest = LoggingDest::kFile;
 
-  if (command_line.GetSwitchValueASCII(switches::kEnableLogging) == "stderr") {
+  const std::string logging_dest =
+      command_line.GetSwitchValueASCII(switches::kEnableLogging);
+  if (logging_dest == "stderr") {
     dest = LoggingDest::kStderr;
+  } else if (logging_dest == "system") {
+    dest = LoggingDest::kSystem;
   }
 
 #if BUILDFLAG(IS_WIN)
   // On Windows child process may be given a handle in the --log-file switch.
   base::win::ScopedHandle log_handle;
-  if (command_line.GetSwitchValueASCII(switches::kEnableLogging) == "handle") {
+  if (logging_dest == "handle") {
     auto handle_str = command_line.GetSwitchValueNative(switches::kLogFile);
     uint32_t handle_value = 0;
     if (base::StringToUint(handle_str, &handle_value)) {
@@ -770,19 +840,23 @@ void InitLogging(const base::CommandLine& command_line) {
   }
 
   if (dest == LoggingDest::kStderr) {
-    settings.logging_dest =
-        logging::LOG_TO_STDERR | logging::LOG_TO_SYSTEM_DEBUG_LOG;
+    settings.logging_dest = logging::LOG_TO_STDERR;
+  } else if (dest == LoggingDest::kSystem) {
+    settings.logging_dest = logging::LOG_TO_SYSTEM_DEBUG_LOG;
   } else {
     // Includes both handle or provided filename on Windows.
     settings.logging_dest = logging::LOG_TO_ALL;
   }
 
-  // APPEND (don't delete) so logs survive a crash+relaunch — lets
-  // us capture the reason for crashes that take the app down (reload, video).
   settings.delete_old = logging::APPEND_TO_OLD_LOG_FILE;
   logging::InitLogging(settings);
   logging::SetLogItems(true /* Process ID */, true /* Thread ID */,
                        true /* Timestamp */, false /* Tick count */);
+#if BUILDFLAG(IS_IOS)
+  if (!command_line.HasSwitch(switches::kEnableLogging)) {
+    logging::SetMinLogLevel(logging::LOGGING_WARNING);
+  }
+#endif
 }
 
 }  // namespace
@@ -806,46 +880,57 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
   }
 
 #if BUILDFLAG(IS_IOS)
-  // BrowserEngineKit (the iOS multi-process model) requires iOS 17.4+.
-  // Force single-process so the renderer/GPU run in-process and never hit the BEK
-  // process-spawn path (which is nil on iOS 15 and crashes).
+  // BrowserEngineKit хоче iOS 17.4+, тому single process
+  // спавн процесів BEK на iOS 15 падає
   command_line.AppendSwitch(switches::kSingleProcess);
-  command_line.AppendSwitchASCII("enable-features", "WebContentsDiscard");
-
-  // Keep Chromium errors available for device diagnostics.
-  if (!command_line.HasSwitch(switches::kLogFile)) {
+  command_line.AppendSwitchASCII("enable-features",
+                                 "WebContentsDiscard,GlobalPrivacyControlApi");
+  // Web Bluetooth без сховища дозволів не працює, а перший доступ сторінки
+  // (вхід у Google) валив процес
+  {
+    const std::string disabled =
+        command_line.GetSwitchValueASCII(switches::kDisableBlinkFeatures);
     command_line.AppendSwitchASCII(
-        switches::kLogFile, BlinkFullLogPath());
+        switches::kDisableBlinkFeatures,
+        disabled.empty() ? "WebBluetooth" : disabled + ",WebBluetooth");
   }
-  // Select a conservative V8 configuration based on runtime code-signing
-  // authorization. Non-heap buffers share the same process memory budget.
+
+  // INFO в лог не пишемо, це переважно console.log сторінок
+  // на 6 Plus файл за кілька місяців виріс до пів гігабайта
+  if (!command_line.HasSwitch(switches::kLogFile)) {
+    const char* full_log = BlinkFullLogPath();
+    struct stat st;
+    if (stat(full_log, &st) == 0 && st.st_size > 8 * 1024 * 1024) {
+      const std::string old_log = std::string(full_log) + ".old";
+      std::rename(full_log, old_log.c_str());
+    }
+    command_line.AppendSwitchASCII(switches::kLogFile, full_log);
+  }
   if (!command_line.HasSwitch("js-flags")) {
-    const bool basic_exec_available = ProbeIOSBasicExecutableMemory();
+    // пакет без JIT виконуваної пам'яті не потребує, а перевірка без дозволу
+    // JIT
+    // може закінчитись SIGKILL, як у LiveContainer на iOS 18
+    const bool jit_bundle = IsIOSJITBundle();
     const bool runtime_jit_authorized = IsIOSRuntimeJITAuthorized();
-    if (basic_exec_available) {
-      BLINKER_DIAG(
-          "JITPROBE_BASIC_EXEC_OK: basic executable memory succeeded\n");
+    bool basic_exec_available = false;
+    bool coderange_execution_available = false;
+    if (jit_bundle) {
+      basic_exec_available = ProbeIOSBasicExecutableMemory();
+      if (basic_exec_available) {
+        BLINKER_DIAG(
+            "JITPROBE_BASIC_EXEC_OK: basic executable memory succeeded\n");
+      }
+      coderange_execution_available =
+          ProbeIOSCodeRangePatternExecutableMemory();
+      // обидві перевірки навмисно валять процес, тому лише за прапором
+      // на Relaxin і RootHide (A16) застосунок гине до старту
+      if (ReadIOSPrefInt(CFSTR("BlinkJITProbes"), 0) != 0) {
+        ProbeIOSRwxExecutableMemory();
+        ProbeIOSDualMappingExecutableMemory();
+      }
     }
-    const bool coderange_execution_available =
-        ProbeIOSCodeRangePatternExecutableMemory();
-    // Both of these are pure diagnostics — their results are not used to pick a
-    // tier — and both deliberately fault to probe what the kernel allows. Their
-    // sigsetjmp guard recovers on Dopamine/iOS 15, but on Relaxin/RootHide
-    // (iOS 17.2.1, A16) executing the dual mapping's RX view faults in a way the
-    // handler cannot return from, killing the app before the browser ever
-    // starts. Off by default; set BlinkJITProbes=1 to collect the data when
-    // actually diagnosing a JIT problem.
-    if (ReadIOSPrefInt(CFSTR("BlinkJITProbes"), 0) != 0) {
-      ProbeIOSRwxExecutableMemory();
-      ProbeIOSDualMappingExecutableMemory();
-    }
-    // Dopamine reports JIT authorization through CS_DEBUGGED.  palera1n on
-    // older arm64 devices may instead grant executable mappings through the
-    // dynamic-codesigning entitlement without setting that status bit.  Trust
-    // that configuration only after both guarded execution probes succeeded;
-    // stock/sideloaded installs fail the probes and remain safely jitless.
     const bool executable_jit_available =
-        IsIOSJITBundle() &&
+        jit_bundle &&
         (runtime_jit_authorized ||
          (basic_exec_available && coderange_execution_available));
     if (!runtime_jit_authorized && executable_jit_available) {
@@ -866,20 +951,15 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
     BLINKER_DIAGF("JIT_TIER: %d (%s) js-flags=%s\n", tier, IOSJitTierName(tier), js_flags.c_str());
   }
 
-  // The web-content area stays black (the GPU display surface is
-  // never created) and the process dies ~5s after the window appears — the
-  // signature of the GPU watchdog killing a stuck GPU thread. Disable it so the
-  // app survives and we can see how far GPU/compositor init actually gets.
+  // сторож GPU вбиває завислий потік секунд за 5 і сторінка лишається чорна
+  // вимкнено щоб бачити де стала ініціалізація
   command_line.AppendSwitch("disable-gpu-watchdog");
 
-  // Bound the compositor's GPU/tile memory budget. By default the
-  // tile manager sizes its cache from a large "available GPU memory" estimate,
-  // so heavy / many-iframe pages cache a lot of tile RAM and push total RSS
-  // over the iOS jetsam limit (silent SIGKILL). Capping it keeps tile memory in
-  // check (the bigger lever is the memory-pressure purge wired in
-  // shell_application_ios.mm). Scale it with installed RAM: decoded fullscreen
-  // video frames are outside this cache and need meaningful headroom on 1GB
-  // A7/A8 devices.
+  // Програмно декодовані кадри VP9 ішли через пул MappableSharedImageVideoFramePool
+  // і жоден не повертався. 720p ріс на 40 МБ за секунду до смерті застосунку
+  // (YouTube на 13 Pro, 14 Pro Max і 6 Plus). Без пулу кадри йдуть звичайним шляхом
+  command_line.AppendSwitch("disable-gpu-memory-buffer-video-frames");
+
   if (!command_line.HasSwitch("force-gpu-mem-available-mb")) {
     const uint64_t ram_mb =
         content::blinker_memory::DevicePhysicalMemory() / (1024 * 1024);
@@ -889,11 +969,9 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
                                               : "96";
     command_line.AppendSwitchASCII("force-gpu-mem-available-mb", gpu_mem_mb);
 
-    // The 6/6 Plus report a 3x UIKit scale, creating 2208x1242 compositor
-    // surfaces during YouTube fullscreen rotation.  Exit briefly needs both
-    // landscape and restored surfaces and crosses the ~650MiB jetsam limit.
-    // A 2x backing store cuts those allocations by more than half while the
-    // physical display still provides UIKit's normal final scaling.
+    // на 6 і 6 Plus масштаб 3x, поворот fullscreen YouTube дає поверхні
+    // 2208x1242
+    // за лімітом jetsam. З 2x виділень вдвічі менше
     if (ram_mb < 1500 &&
         !command_line.HasSwitch("force-device-scale-factor")) {
       command_line.AppendSwitchASCII("force-device-scale-factor", "2");
@@ -904,55 +982,57 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
     BLINKER_DIAGF("MEMBUDGET: device_ram=%lluMB gpu_mem=%sMB\n", static_cast<unsigned long long>(ram_mb), gpu_mem_mb);
   }
 
-  // Skia Graphite (Dawn/Metal) is the default rasterizer, but Dawn's Metal
-  // backend raises an unhandled ObjC exception while encoding a render pass on
-  // pre-A9 GPUs, aborting the GPU thread the moment a page paints (GitHub
-  // issue #10, iPad Air 2 / A8X). Upstream gates Graphite per-model on Mac and
-  // not at all on iOS, where Chrome's minimum OS excludes those parts; we still
-  // run there, so apply the equivalent floor and fall back to Ganesh GL.
-  if (BlinkIOSGpuSupportsGraphite && !BlinkIOSGpuSupportsGraphite()) {
+  bool graphite_os = false;
+  if (__builtin_available(iOS 13.0, *)) {
+    graphite_os = true;
+  }
+  if (!graphite_os ||
+      (BlinkIOSGpuSupportsGraphite && !BlinkIOSGpuSupportsGraphite())) {
     command_line.AppendSwitch(switches::kDisableSkiaGraphite);
-    BLINKER_DIAG("GPUFAMILY: below Apple3, Skia Graphite disabled\n");
+    BLINKER_DIAG("GPUFAMILY: legacy OS or GPU, Skia Graphite disabled\n");
   }
 
-  // ANGLE's current Metal backend can request renderbuffer descriptors that
-  // the iOS 12 A8/A8X driver aborts on instead of reporting as unsupported.
-  // Keep accelerated page compositing, but do not expose WebGL to pages on the
-  // legacy OS. This prevents a canvas from taking down the whole browser while
-  // ordinary HTML/CSS/video continues to use the GPU compositor.
+#if defined(BLINKER_LEGACY_LOW_MEMORY)
+  // карантин звільнень PartitionAlloc на великому base::Value роздував список
+  // до 32 МБ і вичерпував менший legacy пул
+  const std::string legacy_disabled = ",PartitionAllocSchedulerLoopQuarantine";
+#else
+  const std::string legacy_disabled;
+#endif
+  // драйвер A8/A8X на iOS 12 падає на деяких renderbuffer у ANGLE Metal
+  // композитинг лишається прискореним, WebGL не даємо
   if (!__builtin_available(iOS 13.0, *)) {
     command_line.AppendSwitch("disable-webgl");
     command_line.AppendSwitch("disable-webgpu");
     command_line.AppendSwitchASCII(
         "disable-features",
         "WebGPUService,avfoundation-overlays,overlay-fullscreen-video,"
-        "BackForwardCache");
+        "BackForwardCache" +
+            legacy_disabled);
     BLINKER_DIAG(
         "GPUFAMILY: legacy WebGL/WebGPU and black-screen AV video overlays disabled\n");
   } else {
-    // Keep Android's fullscreen-overlay policy disabled, but allow Chromium's
-    // native Apple AVSampleBufferDisplayLayer. The compositor now flushes and
-    // falls back to IOSurface if that layer fails, and the live layer also
-    // supplies Apple's AVPictureInPictureController on iOS 15+.
-    command_line.AppendSwitchASCII("disable-features",
-                                   "overlay-fullscreen-video,BackForwardCache");
+    command_line.AppendSwitchASCII(
+        "disable-features",
+        "overlay-fullscreen-video,BackForwardCache" + legacy_disabled);
     BLINKER_DIAG(
         "VIDEO: native Apple video layer and PiP enabled with IOSurface fallback\n");
   }
 
-  // Optional proxy for Tor / .onion (Settings -> Tor / Proxy, saved
-  // as NSUserDefaults "BlinkProxy", e.g. socks5://127.0.0.1:9050).
-  if (CFPropertyListRef pv = CFPreferencesCopyAppValue(
-          CFSTR("BlinkProxy"), kCFPreferencesCurrentApplication)) {
-    if (CFGetTypeID(pv) == CFStringGetTypeID()) {
-      char buf[256] = {0};
-      if (CFStringGetCString((CFStringRef)pv, buf, sizeof(buf),
-                             kCFStringEncodingUTF8) &&
-          buf[0] != '\0') {
-        command_line.AppendSwitchASCII("proxy-server", buf);
-      }
-    }
-    CFRelease(pv);
+  // SOCKS5 резолвить DNS на проксі, тому локальні DNS/UDP шляхи заборонені
+  // щоб його не обійти
+  const std::string proxy = content::blinker_proxy::SavedServer();
+  if (!proxy.empty()) {
+    command_line.AppendSwitchASCII("proxy-server", proxy);
+    command_line.AppendSwitchASCII("proxy-bypass-list", "<-loopback>");
+    command_line.AppendSwitch("disable-quic");
+    command_line.AppendSwitchASCII("force-webrtc-ip-handling-policy",
+                                   "disable_non_proxied_udp");
+    const auto server = net::ProxyUriToProxyServer(
+        proxy, net::ProxyServer::SCHEME_HTTP);
+    command_line.AppendSwitchASCII(
+        "host-resolver-rules",
+        "MAP * ~NOTFOUND, EXCLUDE " + server.host_port_pair().host());
   }
 
 #endif
@@ -1191,9 +1271,20 @@ std::optional<int> ShellMainDelegate::PostEarlyInitialization(
   // TODO(crbug.com/40062835): Clarify which users of
   // PoissonAllocationSampler we have in the ContentShell. Do we really need to
   // enforce it?
+  const auto poisson_sampler_inclusion =
+      (EXPENSIVE_TEST_LOGIC_IS_ON() ||
+#if !BUILDFLAG(IS_ANDROID)
+       switches::IsRunWebTestsSwitchPresent()
+#else
+       false
+#endif
+           )
+          ? memory_system::DispatcherParameters::
+                PoissonAllocationSamplerInclusion::kEnforce
+          : memory_system::DispatcherParameters::
+                PoissonAllocationSamplerInclusion::kDynamic;
   memory_system::Initializer()
-      .SetDispatcherParameters(memory_system::DispatcherParameters::
-                                   PoissonAllocationSamplerInclusion::kEnforce,
+      .SetDispatcherParameters(poisson_sampler_inclusion,
                                memory_system::DispatcherParameters::
                                    AllocationTraceRecorderInclusion::kIgnore,
                                process_type)
@@ -1230,7 +1321,8 @@ ContentRendererClient* ShellMainDelegate::CreateContentRendererClient() {
     return renderer_client_.get();
   }
 #endif
-  renderer_client_ = std::make_unique<ShellContentRendererClient>();
+  renderer_client_ =
+      std::make_unique<ShellContentRendererClient>(is_content_browsertests_);
   return renderer_client_.get();
 }
 
