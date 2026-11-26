@@ -81,6 +81,7 @@ If you successfully test Blinker Fluid on another iOS version or device, **pleas
 - Multiple search engines
 - Desktop & mobile browsing
 - Video playback
+- Semi-extension support
 - Face ID / Passcode app lock
 - Private Mode
 - Built-in content/ad blocking
@@ -129,12 +130,12 @@ JITless builds may feel slower and can have issues loading certain websites beca
 - [ ] Website compatibility improvements  
   Continuously being improved with each release.
 
-- [ ] Further Private Mode / browsing privacy improvements
+- [x] Further Private Mode / browsing privacy improvements
 
 ## Features that will most likely never be added
 
-- [ ] Extension support  
-  Implementing full Chromium extension support on iOS would be extremely complex and time-consuming, so it is not currently planned.
+- [x] Extension support  
+  Semi-extension support has been added as of v.0.3.2 and will continue being updated. 
 
 - [ ] Built-in password manager  
   This would also require significant additional work. Use iCloud Keychain, [Aurora](https://github.com/Luki120/AuroraC), or another password manager instead.
