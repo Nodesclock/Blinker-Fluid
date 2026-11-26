@@ -74,6 +74,7 @@ component("accelerated_widget_mac") {
 
   deps = [
     "//base",
+    "//build:ios_buildflags",
     "//components/metal_util",
     "//media",
     "//skia",
@@ -98,6 +99,7 @@ test("accelerated_widget_mac_unittests") {
     "//skia",
     "//testing/gmock",
     "//testing/gtest",
+    "//ui/base",
     "//ui/gfx:test_support",
     "//ui/gl",
   ]

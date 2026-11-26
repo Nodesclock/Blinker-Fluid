@@ -46,12 +46,8 @@ scoped_refptr<GLContext> CreateGLContext(GLShareGroup* share_group,
       return stub_context;
     }
     default:
-      // Metal is the only ANGLE backend on iOS, so when EGL display creation
-      // fails there is no implementation left and InitializeGLOneOff leaves
-      // kGLImplementationNone behind. Upstream reaches this only in states that
-      // cannot happen (every other platform has a software fallback), but here
-      // it is a live path: report failure so GpuChannelManager surfaces
-      // ContextResult::kFatalFailure instead of aborting the process.
+      // В ANGLE на iOS лиш Metal, запасного нету
+      // тому nullptr, щоб GpuChannelManager дав kFatalFailure
       LOG(ERROR) << "No GL implementation available; cannot create GL context.";
       return nullptr;
   }

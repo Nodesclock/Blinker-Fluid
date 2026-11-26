@@ -31,10 +31,7 @@ component("shell_dialogs") {
     "shell_dialogs_export.h",
   ]
 
-  configs += [
-    "//build/config/compiler:wexit_time_destructors",
-    "//build/config/compiler:wglobal_constructors",
-  ]
+  configs += [ "//build/config/compiler:wglobal_constructors" ]
 
   defines = [ "SHELL_DIALOGS_IMPLEMENTATION" ]
 
@@ -102,6 +99,8 @@ component("shell_dialogs") {
       "base_shell_dialog_win.h",
       "execute_select_file_win.cc",
       "execute_select_file_win.h",
+      "safe_accept_file_dialog_event_handler_win.cc",
+      "safe_accept_file_dialog_event_handler_win.h",
       "select_file_dialog_win.cc",
       "select_file_dialog_win.h",
       "select_file_utils_win.h",
@@ -183,11 +182,18 @@ test("shell_dialogs_unittests") {
       "//components/dbus",
       "//dbus",
       "//dbus:test_support",
+      "//ui/aura",
+      "//ui/display:test_support",
+      "//ui/ozone:ozone_switches",
+      "//ui/platform_window",
     ]
   }
 
   if (is_mac) {
-    deps += [ "//components/remote_cocoa/app_shim" ]
+    deps += [
+      "//components/remote_cocoa/app_shim",
+      "//components/remote_cocoa/app_shim:features",
+    ]
   }
 
   # TODO: Remove once http://crbug.com/951419 is fixed.

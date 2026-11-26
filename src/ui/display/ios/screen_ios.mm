@@ -134,12 +134,8 @@ class ScreenIos : public ScreenBase, public ScreenNotification {
     }
 
     const int64_t display_id = 0;
-    // UIScreen.bounds is expressed in the screen's fixed portrait coordinate
-    // space on modern iOS. Chromium's Display bounds, however, feed the Web
-    // `screen.width/height` APIs and must describe the current interface
-    // orientation. Keeping 430x932 here while the web view is 932x430 makes
-    // fullscreen sites (notably YouTube) lay out only the left half of the
-    // landscape renderer surface.
+    // UIScreen.bounds завжди портретні, width/height беремо з орієнтацією
+    // інакше fullscreen YouTube малює лиш ліву половину
     UIInterfaceOrientation interface_orientation =
         GetActiveInterfaceOrientation();
     CGSize display_size = screen.bounds.size;
@@ -160,9 +156,8 @@ class ScreenIos : public ScreenBase, public ScreenNotification {
     }
     display.set_device_scale_factor(scale);
 
-    // Left unset, the Display keeps its 60Hz default and viz paces BeginFrames
-    // at 60 on a ProMotion panel. CADisableMinimumFrameDurationOnPhone in the
-    // Info.plist only lifts the cap; the rate still has to be asked for.
+    // Без цього Display лишається на 60Hz, viz на ProMotion теж дає 60
+    // CADisableMinimumFrameDurationOnPhone лиш знімає ліміт
     if (screen.maximumFramesPerSecond > 0) {
       display.set_display_frequency(
           static_cast<float>(screen.maximumFramesPerSecond));

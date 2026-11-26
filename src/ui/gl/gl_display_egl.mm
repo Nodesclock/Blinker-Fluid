@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ui/gl/gl_display.h"
-
 #import <Metal/Metal.h>
 
 #include "base/apple/scoped_nsobject.h"
 #include "build/build_config.h"
 #include "ui/gl/gl_bindings.h"
+#include "ui/gl/gl_display.h"
+#include "ui/gl/gl_implementation.h"
 
 // From ANGLE's egl/eglext_angle.h.
 #ifndef EGL_ANGLE_metal_shared_event_sync
@@ -41,8 +41,6 @@ GLDisplayEGL::~GLDisplayEGL() = default;
 bool GLDisplayEGL::CreateMetalSharedEvent(id<MTLSharedEvent>* shared_event_out,
                                           uint64_t* signal_value_out) {
 #if BUILDFLAG(IS_IOS)
-  // MTLSharedEvent does not exist on iOS 11. Returning false selects the
-  // existing non-shared-event synchronization path.
   if (!@available(iOS 12.0, *)) {
     return false;
   }
@@ -145,6 +143,32 @@ void GLDisplayEGL::WaitForMetalSharedEvent(id<MTLSharedEvent> shared_event,
   // The wait on the sync object has been enqueued already, so it's safe to
   // destroy it now.
   eglDestroySync(display_, sync);
+}
+
+id<MTLDevice> GLDisplayEGL::GetMetalDevice() const {
+  if (GetANGLEImplementation() != ANGLEImplementation::kMetal ||
+      display_ == EGL_NO_DISPLAY ||
+      !g_driver_egl.client_ext.b_EGL_EXT_device_query) {
+    return nil;
+  }
+  EGLAttrib angle_device_attrib = 0;
+  if (!eglQueryDisplayAttribEXT(display_, EGL_DEVICE_EXT,
+                                &angle_device_attrib)) {
+    return nil;
+  }
+  EGLDeviceEXT angle_device =
+      reinterpret_cast<EGLDeviceEXT>(angle_device_attrib);
+  EGLAttrib metal_device_attrib = 0;
+  if (!eglQueryDeviceAttribEXT(angle_device, EGL_METAL_DEVICE_ANGLE,
+                               &metal_device_attrib)) {
+    return nil;
+  }
+  return (__bridge id<MTLDevice>)(void*)metal_device_attrib;
+}
+
+size_t GLDisplayEGL::GetMetalDeviceAllocatedMemory() const {
+  id<MTLDevice> device = GetMetalDevice();
+  return device ? device.currentAllocatedSize : 0;
 }
 
 void GLDisplayEGL::InitMetalSharedEventStorage() {

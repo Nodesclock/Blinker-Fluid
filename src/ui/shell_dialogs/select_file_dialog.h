@@ -123,13 +123,10 @@ class SHELL_DIALOGS_EXPORT SelectFileDialog
     // are equivalent. Do NOT include leading periods.
     std::vector<std::vector<base::FilePath::StringType>> extensions;
 
-    // Preserve the web input's original accept tokens for platforms whose
-    // native picker can distinguish photos, videos and generic documents.
-    // Extensions alone lose `image/*`, `video/*`, and capture intent.
+    // Беремо accept з input тому що розширення самі гублять `image/*`,
+    // `video/*` і capture
     std::vector<std::u16string> accept_types;
 
-    // HTML media-capture intent (`<input type=file capture>`). Platforms that
-    // support a native camera may open it directly.
     bool use_media_capture = false;
 
     // Overrides the system descriptions of the specified extensions. Entries
@@ -257,6 +254,8 @@ class SHELL_DIALOGS_EXPORT SelectFileDialog
   // The listener to be notified of selection completion.
   raw_ptr<Listener> listener_;
 
+  SelectFilePolicy* select_file_policy() { return select_file_policy_.get(); }
+
  private:
   // Tests if the file selection dialog can be displayed by
   // testing if the AllowFileSelectionDialogs-Policy is
@@ -276,6 +275,23 @@ class SHELL_DIALOGS_EXPORT SelectFileDialog
 SelectFileDialog* CreateSelectFileDialog(
     SelectFileDialog::Listener* listener,
     std::unique_ptr<SelectFilePolicy> policy);
+
+// Sets ui::SelectFileDialogFactory for the duration of this object's lifetime,
+// restoring the previous factory (if any) upon destruction.
+class SHELL_DIALOGS_EXPORT ScopedSetSelectFileDialogFactory {
+ public:
+  explicit ScopedSetSelectFileDialogFactory(
+      std::unique_ptr<SelectFileDialogFactory> factory);
+  ~ScopedSetSelectFileDialogFactory();
+
+  ScopedSetSelectFileDialogFactory(const ScopedSetSelectFileDialogFactory&) =
+      delete;
+  ScopedSetSelectFileDialogFactory& operator=(
+      const ScopedSetSelectFileDialogFactory&) = delete;
+
+ private:
+  std::unique_ptr<SelectFileDialogFactory> previous_factory_;
+};
 
 }  // namespace ui
 

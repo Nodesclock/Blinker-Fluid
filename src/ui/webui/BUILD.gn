@@ -3,10 +3,11 @@
 # found in the LICENSE file.
 
 import("//build/buildflag_header.gni")
+import("//build/config/features.gni")
 import("//components/signin/features.gni")
 import("//ui/webui/webui_features.gni")
 
-if (!is_ios) {
+if (use_blink) {
   static_library("webui") {
     sources = [
       "mojo_web_ui_controller.cc",
@@ -37,7 +38,7 @@ if (!is_ios) {
       "//ui/webui/resources/js/metrics_reporter:mojo_bindings",
     ]
 
-    if (enable_webui_ntp) {
+    if (!is_ios) {
       public_deps +=
           [ "//ui/webui/resources/cr_components/color_change_listener:mojom" ]
       sources += [
@@ -60,6 +61,7 @@ if (!is_ios) {
           [ "//ui/webui/resources/js/batch_upload_promo:mojo_bindings" ]
     }
   }
+
   source_set("test_support") {
     testonly = true
 
@@ -76,8 +78,7 @@ if (!is_ios) {
     ]
   }
 } else {
-  # iOS stubs so content/test targets referencing these resolve under the
-  # experimental use_blink=true config. content_shell does not need WebUI.
+  # Заглушки під iOS щоб content/test таргети резолвились з use_blink=true.
   group("webui") {
   }
   group("test_support") {
@@ -88,7 +89,12 @@ if (!is_ios) {
 buildflag_header("buildflags") {
   header = "buildflags.h"
   flags = [
+    "ENABLE_WEBUI_BOOKMARKS=$enable_webui_bookmarks",
     "ENABLE_WEBUI_GENERATE_CODE_CACHE=$enable_webui_generate_code_cache",
+    "ENABLE_WEBUI_HISTORY=$enable_webui_history",
     "ENABLE_WEBUI_NTP=$enable_webui_ntp",
+    "ENABLE_WEBUI_TABSTRIP_NTB=$enable_webui_tabstrip_ntb",
+    "ENABLE_WEBUI_CONTEXTUAL_TASKS_COMPOSEBOX=$enable_webui_contextual_tasks_composebox",
+    "WEBUI_CODE_CACHE_PAK_FILENAME=\"$webui_code_cache_pak_filename\"",
   ]
 }

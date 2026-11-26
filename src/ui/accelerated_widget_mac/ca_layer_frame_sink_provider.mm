@@ -18,7 +18,7 @@ WidgetToSinkProviderMap() {
 
 @implementation CALayerFrameSinkProvider {
   uint64_t _view_handle;
-  CALayer* _contentLayer;  // iOS-15 port: the GPU's on-screen rendered layer.
+  CALayer* _contentLayer;
 }
 
 - (ui::CALayerFrameSink*)frameSink {
@@ -41,7 +41,6 @@ WidgetToSinkProviderMap() {
 
 - (void)layoutSubviews {
   [super layoutSubviews];
-  // Keep the GPU's rendered layer filling the view across layout / rotation.
   if (_contentLayer) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];

@@ -6,20 +6,26 @@
 
 #include <Availability.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <CoreVideo/CoreVideo.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "base/apple/mach_logging.h"
+#include "base/apple/scoped_mach_port.h"
 #include "base/bits.h"
 #include "base/command_line.h"
+#include "base/containers/fixed_flat_map.h"
 #include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/mac/mac_util.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/trace_event/trace_event.h"
 #include "components/viz/common/resources/shared_image_format.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
+#include "third_party/skia/include/core/SkData.h"
+#include "third_party/skia/include/encode/SkICC.h"
+#include "third_party/skia/modules/skcms/skcms.h"
 #include "ui/gfx/color_space.h"
-#include "ui/gfx/icc_profile.h"
 #include "ui/gfx/mac/color_space_util.h"
 
 namespace gfx {
@@ -34,54 +40,376 @@ void AddIntegerValue(CFMutableDictionaryRef dictionary,
   CFDictionaryAddValue(dictionary, key, number.get());
 }
 
-// Return the expected four character code pixel format for an IOSurface with
-// the specified viz::SharedImageFormat.
-uint32_t SharedImageFormatToIOSurfacePixelFormat(viz::SharedImageFormat format,
-                                                 bool override_rgba_to_bgra) {
-  if (format == viz::SinglePlaneFormat::kR_8) {
-    return 'L008';
-  } else if (format == viz::SinglePlaneFormat::kR_F16) {
-    return 'L00h';
-  } else if (format == viz::SinglePlaneFormat::kRG_88) {
-    return '2C08';
-  } else if (format == viz::SinglePlaneFormat::kR_16) {
-    return 'L016';
-  } else if (format == viz::SinglePlaneFormat::kRG_1616) {
-    return '2C16';
-  } else if (format == viz::SinglePlaneFormat::kBGRA_1010102) {
-    return 'l10r';  // little-endian ARGB2101010 full-range ARGB
-  } else if (format == viz::SinglePlaneFormat::kBGRA_8888 ||
-             format == viz::SinglePlaneFormat::kBGRX_8888) {
-    return 'BGRA';
-  } else if (format == viz::SinglePlaneFormat::kRGBA_8888 ||
-             format == viz::SinglePlaneFormat::kRGBX_8888) {
-    return override_rgba_to_bgra ? 'BGRA' : 'RGBA';
-  } else if (format == viz::SinglePlaneFormat::kRGBA_F16) {
-    return 'RGhA';
-  } else if (format == viz::MultiPlaneFormat::kNV12) {
-    return '420v';
-  } else if (format == viz::MultiPlaneFormat::kNV12A) {
-    return 'v0a8';
-  } else if (format == viz::MultiPlaneFormat::kP010) {
-    return 'x420';
-  } else {
-    // Technically RGBA_1010102 should be accepted as 'R10k', but then it won't
-    // be supported by CGLTexImageIOSurface2D(), so it's best to reject it here.
-    NOTREACHED();
-  }
+void AddIntegerValue64(CFMutableDictionaryRef dictionary,
+                       const CFStringRef key,
+                       int64_t value) {
+  base::apple::ScopedCFTypeRef<CFNumberRef> number(
+      CFNumberCreate(nullptr, kCFNumberSInt64Type, &value));
+  CFDictionaryAddValue(dictionary, key, number.get());
 }
 
+struct IOSurfaceFormatInfo {
+  uint32_t cv_pixel_format = 0;
+
+  // The list of SharedImageFormats that the CVPixelFormat can map to.
+  static constexpr size_t kMaxNumSharedImageFormats = 2;
+  std::optional<viz::SharedImageFormat>
+      shared_image_formats[kMaxNumSharedImageFormats] = {std::nullopt,
+                                                         std::nullopt};
+
+  // Various properties of the CVPixelFormat.
+  uint32_t flags = 0;
+
+  // The color range of the format.
+  ColorSpace::RangeID range = ColorSpace::RangeID::INVALID;
+
+  // The number of bits per component.
+  uint32_t bits_per_component = 0;
+};
+
+// This flag is set if an IOSurface of the specified format can be imported
+// using a SharedTextureMemoryDescriptor.
+constexpr uint32_t kWebGPUImport = 0x1;
+
+// This flag is set if an IOSurface of the specified format is compressed
+// and therefore cannot be accessed by the CPU.
+constexpr uint32_t kCompressed = 0x2;
+
+// This flag is set if an IOSurface of the specified format can be displayed
+// using an AVSampleBufferDisplayLayer.
+constexpr uint32_t kCanDisplayAsAVSampleBuffer = 0x4;
+
+constexpr IOSurfaceFormatInfo kIOSurfaceFormats[] = {
+    // 8-bit unorm formats.
+    {
+        kCVPixelFormatType_OneComponent8,
+        {viz::SinglePlaneFormat::kR_8},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_TwoComponent8,
+        {viz::SinglePlaneFormat::kRG_88},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_32BGRA,
+        {viz::SinglePlaneFormat::kBGRA_8888,
+         viz::SinglePlaneFormat::kBGRX_8888},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_32RGBA,
+        {viz::SinglePlaneFormat::kRGBA_8888,
+         viz::SinglePlaneFormat::kRGBX_8888},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+
+    // 16-bit unorm formats.
+    {
+        kCVPixelFormatType_OneComponent16,
+        {viz::SinglePlaneFormat::kR_16},
+        0,
+        ColorSpace::RangeID::FULL,
+        16,
+    },
+    {
+        kCVPixelFormatType_TwoComponent16,
+        {viz::SinglePlaneFormat::kRG_1616},
+        0,
+        ColorSpace::RangeID::FULL,
+        16,
+    },
+
+    // 16-bit float formats.
+    {
+        kCVPixelFormatType_OneComponent16Half,
+        {viz::SinglePlaneFormat::kR_F16},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        16,
+    },
+    {
+        kCVPixelFormatType_TwoComponent16Half,
+        {},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        16,
+    },
+    {
+        kCVPixelFormatType_64RGBAHalf,
+        {viz::SinglePlaneFormat::kRGBA_F16},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        16,
+    },
+
+    // 10-10-10-2 format.
+    {
+        kCVPixelFormatType_ARGB2101010LEPacked,
+        {viz::SinglePlaneFormat::kBGRA_1010102},
+        kWebGPUImport,
+        ColorSpace::RangeID::FULL,
+        10,
+    },
+
+    // 8-bit video formats.
+    {
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kNV12},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::LIMITED,
+        8,
+    },
+    {
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kNV12},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kNV16},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::LIMITED,
+        8,
+    },
+    {
+        kCVPixelFormatType_422YpCbCr8BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kNV16},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kNV24},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::LIMITED,
+        8,
+    },
+    {
+        kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kNV24},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_420YpCbCr8VideoRange_8A_TriPlanar,
+        {viz::MultiPlaneFormat::kNV12A},
+        0,
+        ColorSpace::RangeID::LIMITED,
+        8,
+    },
+    {
+        kCVPixelFormatType_420YpCbCr8Planar,
+        {viz::MultiPlaneFormat::kI420},
+        0,
+        ColorSpace::RangeID::LIMITED,
+        8,
+    },
+
+    // 10-bit video formats.
+    {
+        kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kP010},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::LIMITED,
+        10,
+    },
+    {
+        kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kP010},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::FULL,
+        10,
+    },
+
+    {
+        kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kP210},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::LIMITED,
+        10,
+    },
+    {
+        kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kP210},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::FULL,
+        10,
+    },
+    {
+        kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kP410},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::LIMITED,
+        10,
+    },
+    {
+        kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kP410},
+        kWebGPUImport | kCanDisplayAsAVSampleBuffer,
+        ColorSpace::RangeID::FULL,
+        10,
+    },
+
+    // Losslessly-compressed video formats. These occur after the non-compressed
+    // versions, and so SharedImageFormatToIOSurfacePixelFormat will not select
+    // them.
+    {
+        kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kNV12},
+        kCompressed,
+        ColorSpace::RangeID::LIMITED,
+        8,
+    },
+    {
+        kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange,
+        {viz::MultiPlaneFormat::kNV12},
+        kCompressed,
+        ColorSpace::RangeID::FULL,
+        8,
+    },
+    {
+        kCVPixelFormatType_Lossless_420YpCbCr10PackedBiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kP010},
+        kCompressed,
+        ColorSpace::RangeID::LIMITED,
+        10,
+    },
+    {
+        kCVPixelFormatType_Lossless_420YpCbCr10PackedBiPlanarFullRange,
+        {viz::MultiPlaneFormat::kP010},
+        kCompressed,
+        ColorSpace::RangeID::FULL,
+        10,
+    },
+    {
+        kCVPixelFormatType_Lossless_422YpCbCr10PackedBiPlanarVideoRange,
+        {viz::MultiPlaneFormat::kP210},
+        kCompressed,
+        ColorSpace::RangeID::LIMITED,
+        10,
+    },
+};
+
 }  // namespace
+
+std::optional<uint32_t> SharedImageFormatToIOSurfacePixelFormat(
+    viz::SharedImageFormat format,
+    bool override_rgba_to_bgra) {
+  if (override_rgba_to_bgra) {
+    if (format == viz::SinglePlaneFormat::kRGBA_8888 ||
+        format == viz::SinglePlaneFormat::kRGBX_8888) {
+      return kCVPixelFormatType_32BGRA;
+    }
+  }
+  for (const auto& info : kIOSurfaceFormats) {
+    for (const auto& shared_image_format : info.shared_image_formats) {
+      if (shared_image_format == format) {
+        return info.cv_pixel_format;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<viz::SharedImageFormat> IOSurfacePixelFormatToSharedImageFormat(
+    uint32_t cv_pixel_format) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (cv_pixel_format == info.cv_pixel_format) {
+      return info.shared_image_formats[0];
+    }
+  }
+  return std::nullopt;
+}
+
+bool IOSurfacePixelFormatIsWebGPUCompatible(uint32_t cv_pixel_format) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (cv_pixel_format == info.cv_pixel_format) {
+      return (info.flags & kWebGPUImport) != 0;
+    }
+  }
+  return false;
+}
+
+bool IOSurfacePixelFormatSupportsCpuAccess(uint32_t cv_pixel_format) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (cv_pixel_format == info.cv_pixel_format) {
+      // Compressed formats do not support CPU access.
+      return (info.flags & kCompressed) == 0;
+    }
+  }
+  return false;
+}
+
+bool IOSurfacePixelFormatCanDisplayAsAVSampleBuffer(uint32_t cv_pixel_format) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (cv_pixel_format == info.cv_pixel_format) {
+      return (info.flags & kCanDisplayAsAVSampleBuffer) != 0;
+    }
+  }
+  return false;
+}
+
+uint32_t IOSurfacePixelFormatMaxBitsPerComponent(uint32_t cv_pixel_format) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (cv_pixel_format == info.cv_pixel_format) {
+      return info.bits_per_component;
+    }
+  }
+  return 0;
+}
+
+ColorSpace::RangeID IOSurfacePixelFormatRangeID(uint32_t cv_pixel_format) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (cv_pixel_format == info.cv_pixel_format) {
+      return info.range;
+    }
+  }
+  return ColorSpace::RangeID::INVALID;
+}
+
+bool IOSurfacePixelFormatMatchesSharedImageFormat(uint32_t pixel_format,
+                                                  viz::SharedImageFormat format,
+                                                  bool match_rgba_and_bgra) {
+  for (const auto& info : kIOSurfaceFormats) {
+    if (pixel_format == info.cv_pixel_format) {
+      for (const auto& shared_image_format : info.shared_image_formats) {
+        if (shared_image_format == format) {
+          return true;
+        }
+      }
+    }
+  }
+  if (match_rgba_and_bgra) {
+    switch (pixel_format) {
+      case kCVPixelFormatType_32RGBA:
+        return IOSurfacePixelFormatMatchesSharedImageFormat(
+            kCVPixelFormatType_32BGRA, format, false);
+      case kCVPixelFormatType_32BGRA:
+        return IOSurfacePixelFormatMatchesSharedImageFormat(
+            kCVPixelFormatType_32RGBA, format, false);
+    }
+  }
+  return false;
+}
 
 namespace internal {
 
 // static
 mach_port_t IOSurfaceMachPortTraits::Retain(mach_port_t port) {
-  kern_return_t kr =
-      mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1);
-  MACH_LOG_IF(ERROR, kr != KERN_SUCCESS, kr)
-      << "IOSurfaceMachPortTraits::Retain mach_port_mod_refs";
-  return port;
+  return base::apple::RetainMachSendRight(port).release();
 }
 
 // static
@@ -120,16 +448,13 @@ bool IOSurfaceSetColorSpace(IOSurfaceRef io_surface,
   // https://crbug.com/1101041: Introduces the HDR copier.
   // https://crbug.com/1061723: Discussion of issues related to HLG.
   if (__builtin_available(iOS 14.0, *)) {
-    if (color_space == ColorSpace(ColorSpace::PrimaryID::BT2020,
-                                  ColorSpace::TransferID::PQ,
-                                  ColorSpace::MatrixID::BT2020_NCL,
-                                  ColorSpace::RangeID::LIMITED)) {
-      color_space_name = kCGColorSpaceITUR_2100_PQ;
-    } else if (color_space == ColorSpace(ColorSpace::PrimaryID::BT2020,
-                                         ColorSpace::TransferID::HLG,
-                                         ColorSpace::MatrixID::BT2020_NCL,
-                                         ColorSpace::RangeID::LIMITED)) {
-      color_space_name = kCGColorSpaceITUR_2100_HLG;
+    if (color_space.GetPrimaryID() == ColorSpace::PrimaryID::BT2020 &&
+        color_space.GetMatrixID() == ColorSpace::MatrixID::BT2020_NCL) {
+      if (color_space.GetTransferID() == ColorSpace::TransferID::PQ) {
+        color_space_name = kCGColorSpaceITUR_2100_PQ;
+      } else if (color_space.GetTransferID() == ColorSpace::TransferID::HLG) {
+        color_space_name = kCGColorSpaceITUR_2100_HLG;
+      }
     }
   }
 
@@ -156,25 +481,37 @@ bool IOSurfaceSetColorSpace(IOSurfaceRef io_surface,
     return true;
   }
 
-  gfx::ColorSpace as_rgb = color_space.GetAsRGB();
-  gfx::ColorSpace as_full_range_rgb = color_space.GetAsFullRangeRGB();
-
-  // IOSurfaces do not support full-range YUV video. Fortunately, the hardware
-  // decoders never produce full-range video.
+  // For IOSurfaces, color range is a property of the pixel format rather than
+  // the color space. Ensure that the color space's range matches the IOSurface
+  // pixel format's range.
   // https://crbug.com/882627
-  if (color_space != as_rgb && as_rgb == as_full_range_rgb)
-    return false;
+  if (io_surface) {
+    const ColorSpace::RangeID range =
+        IOSurfacePixelFormatRangeID(IOSurfaceGetPixelFormat(io_surface));
+    if (range == ColorSpace::RangeID::INVALID ||
+        range != color_space.GetRangeID()) {
+      return false;
+    }
+  }
 
-  // Generate an ICCProfile from the parametric color space.
-  ICCProfile icc_profile = ICCProfile::FromColorSpace(as_full_range_rgb);
-  if (!icc_profile.IsValid())
+  // Generate an ICC profile from the parametric color space.
+  // TODO(https://crbug.com/540759552): Switch to the SkWriteICCProfile
+  // interface that takes an SkColorSpace when available.
+  SkColorSpacePrimaries primaries = color_space.GetPrimaries();
+  skcms_Matrix3x3 to_XYZD50_matrix;
+  primaries.toXYZD50(&to_XYZD50_matrix);
+  skcms_TransferFunction fn;
+  if (!color_space.GetTransferFunction(&fn)) {
     return false;
+  }
+  sk_sp<SkData> data = SkWriteICCProfile(fn, to_XYZD50_matrix);
+  if (!data) {
+    return false;
+  }
 
   // Package it as a CFDataRef and send it to the IOSurface.
-  std::vector<char> icc_profile_data = icc_profile.GetData();
-  base::apple::ScopedCFTypeRef<CFDataRef> cf_data_icc_profile(CFDataCreate(
-      nullptr, reinterpret_cast<const UInt8*>(icc_profile_data.data()),
-      icc_profile_data.size()));
+  base::apple::ScopedCFTypeRef<CFDataRef> cf_data_icc_profile(
+      CFDataCreate(nullptr, data->bytes(), data->size()));
 
   IOSurfaceSetValue(io_surface, CFSTR("IOSurfaceColorSpace"),
                     cf_data_icc_profile.get());
@@ -196,9 +533,12 @@ ScopedIOSurface CreateIOSurface(const gfx::Size& size,
                                 &kCFTypeDictionaryValueCallBacks));
   AddIntegerValue(properties.get(), kIOSurfaceWidth, size.width());
   AddIntegerValue(properties.get(), kIOSurfaceHeight, size.height());
-  AddIntegerValue(
-      properties.get(), kIOSurfacePixelFormat,
-      SharedImageFormatToIOSurfacePixelFormat(format, override_rgba_to_bgra));
+  std::optional<uint32_t> pixel_format =
+      SharedImageFormatToIOSurfacePixelFormat(format, override_rgba_to_bgra);
+  CHECK(pixel_format)
+      << "Failed to find IOSurface pixel format for SharedImage pixel format "
+      << format.ToString() << ".";
+  AddIntegerValue(properties.get(), kIOSurfacePixelFormat, *pixel_format);
 
   // Don't specify plane information unless there are indeed multiple planes
   // because DisplayLink drivers do not support this.
@@ -237,8 +577,9 @@ ScopedIOSurface CreateIOSurface(const gfx::Size& size,
                       plane_bytes_per_element);
       AddIntegerValue(plane_info.get(), kIOSurfacePlaneBytesPerRow,
                       plane_bytes_per_row);
-      AddIntegerValue(plane_info.get(), kIOSurfacePlaneSize, plane_bytes_alloc);
-      AddIntegerValue(plane_info.get(), kIOSurfacePlaneOffset, plane_offset);
+      AddIntegerValue64(plane_info.get(), kIOSurfacePlaneSize,
+                        plane_bytes_alloc);
+      AddIntegerValue64(plane_info.get(), kIOSurfacePlaneOffset, plane_offset);
       CFArrayAppendValue(planes.get(), plane_info.get());
       total_bytes_alloc = plane_offset + plane_bytes_alloc;
     }
@@ -246,7 +587,7 @@ ScopedIOSurface CreateIOSurface(const gfx::Size& size,
 
     total_bytes_alloc =
         IOSurfaceAlignProperty(kIOSurfaceAllocSize, total_bytes_alloc);
-    AddIntegerValue(properties.get(), kIOSurfaceAllocSize, total_bytes_alloc);
+    AddIntegerValue64(properties.get(), kIOSurfaceAllocSize, total_bytes_alloc);
   } else {
     const size_t bytes_per_element = format.BytesPerPixel();
     const size_t bytes_per_row = IOSurfaceAlignProperty(
@@ -260,7 +601,7 @@ ScopedIOSurface CreateIOSurface(const gfx::Size& size,
     AddIntegerValue(properties.get(), kIOSurfaceBytesPerElement,
                     bytes_per_element);
     AddIntegerValue(properties.get(), kIOSurfaceBytesPerRow, bytes_per_row);
-    AddIntegerValue(properties.get(), kIOSurfaceAllocSize, bytes_alloc);
+    AddIntegerValue64(properties.get(), kIOSurfaceAllocSize, bytes_alloc);
   }
 
   ScopedIOSurface io_surface(IOSurfaceCreate(properties.get()));

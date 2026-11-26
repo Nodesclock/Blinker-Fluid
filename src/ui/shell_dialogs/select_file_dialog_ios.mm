@@ -22,6 +22,15 @@
 #include "ui/shell_dialogs/select_file_policy.h"
 #include "ui/shell_dialogs/selected_file_info.h"
 
+// Labels go through the shell's translation table. Weak, so a target that
+// links this file without the shell still gets the English text.
+extern "C" NSString* BlinkLocalizedString(NSString* english)
+    __attribute__((weak_import));
+
+static NSString* LocalizedLabel(NSString* english) {
+  return BlinkLocalizedString ? BlinkLocalizedString(english) : english;
+}
+
 @interface NativeFileDialog
     : NSObject <UIDocumentPickerDelegate,
                 UIImagePickerControllerDelegate,
@@ -39,6 +48,10 @@
   bool _isDirectory;
   bool _mediaOnly;
   bool _useMediaCapture;
+  bool _mediaAllowed;
+  bool _wantsImages;
+  bool _wantsVideos;
+  bool _keepHEIC;
 }
 
 - (instancetype)initWithDialog:(base::WeakPtr<ui::SelectFileDialogImpl>)dialog
@@ -48,7 +61,11 @@
           allowsOtherFileTypes:(bool)allowsOtherFileTypes
                    isDirectory:(bool)isDirectory
                       mediaOnly:(bool)mediaOnly
-                useMediaCapture:(bool)useMediaCapture;
+                useMediaCapture:(bool)useMediaCapture
+                   mediaAllowed:(bool)mediaAllowed
+                    wantsImages:(bool)wantsImages
+                    wantsVideos:(bool)wantsVideos
+                       keepHEIC:(bool)keepHEIC;
 - (void)dealloc;
 - (void)showFilePickerMenu;
 - (void)showDocumentPicker;
@@ -102,7 +119,11 @@
           allowsOtherFileTypes:(bool)allowsOtherFileTypes
                    isDirectory:(bool)isDirectory
                       mediaOnly:(bool)mediaOnly
-                useMediaCapture:(bool)useMediaCapture {
+                useMediaCapture:(bool)useMediaCapture
+                   mediaAllowed:(bool)mediaAllowed
+                    wantsImages:(bool)wantsImages
+                    wantsVideos:(bool)wantsVideos
+                       keepHEIC:(bool)keepHEIC {
   if (!(self = [super init])) {
     return nil;
   }
@@ -114,6 +135,10 @@
   _isDirectory = isDirectory;
   _mediaOnly = mediaOnly;
   _useMediaCapture = useMediaCapture;
+  _mediaAllowed = mediaAllowed;
+  _wantsImages = wantsImages;
+  _wantsVideos = wantsVideos;
+  _keepHEIC = keepHEIC;
   return self;
 }
 
@@ -125,29 +150,104 @@
   }
 }
 
-- (void)showFilePickerMenu {
-  // Follow the HTML intent directly, like Reynard: image/video inputs open the
-  // actual Apple Photos picker; `capture` opens Camera; generic inputs open
-  // Files. No intermediate Blinker-owned action sheet.
-  if (_useMediaCapture && _mediaOnly &&
-      [UIImagePickerController
+// A site that takes images or videos (or anything) gets the same three
+// choices as in Safari. Folders and non-media accepts go straight to Files,
+// and `capture` goes straight to the camera.
+- (BOOL)cameraAvailable {
+  NSBundle* bundle = NSBundle.mainBundle;
+  if (![UIImagePickerController
           isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
-    [self showCameraPicker];
-  } else if (_mediaOnly) {
-    [self showPhotoPicker];
-  } else {
-    [self showDocumentPicker];
+    return NO;
   }
+  // Without these strings iOS kills the app when the camera opens.
+  if (![bundle objectForInfoDictionaryKey:@"NSCameraUsageDescription"]) {
+    return NO;
+  }
+  if (_wantsVideos &&
+      ![bundle objectForInfoDictionaryKey:@"NSMicrophoneUsageDescription"]) {
+    _wantsVideos = false;
+    if (!_wantsImages) {
+      return NO;
+    }
+  }
+  return YES;
+}
+
+- (void)showFilePickerMenu {
+  if (_isDirectory || !_mediaAllowed) {
+    [self showDocumentPicker];
+    return;
+  }
+  const BOOL camera = [self cameraAvailable];
+  if (_useMediaCapture && _mediaOnly && camera) {
+    [self showCameraPicker];
+    return;
+  }
+
+  UIAlertController* sheet =
+      [UIAlertController alertControllerWithTitle:nil
+                                          message:nil
+                                   preferredStyle:UIAlertControllerStyleActionSheet];
+  __weak NativeFileDialog* weakSelf = self;
+  [sheet addAction:[UIAlertAction
+                       actionWithTitle:LocalizedLabel(@"Photo Library")
+                                 style:UIAlertActionStyleDefault
+                               handler:^(UIAlertAction*) {
+                                 [weakSelf showPhotoPicker];
+                               }]];
+  if (camera) {
+    [sheet addAction:[UIAlertAction
+                         actionWithTitle:LocalizedLabel(
+                                             _wantsVideos && _wantsImages
+                                                 ? @"Take Photo or Video"
+                                                 : (_wantsVideos
+                                                        ? @"Record Video"
+                                                        : @"Take Photo"))
+                                   style:UIAlertActionStyleDefault
+                                 handler:^(UIAlertAction*) {
+                                   [weakSelf showCameraPicker];
+                                 }]];
+  }
+  [sheet addAction:[UIAlertAction
+                       actionWithTitle:LocalizedLabel(@"Choose File")
+                                 style:UIAlertActionStyleDefault
+                               handler:^(UIAlertAction*) {
+                                 [weakSelf showDocumentPicker];
+                               }]];
+  [sheet addAction:[UIAlertAction
+                       actionWithTitle:LocalizedLabel(@"Cancel")
+                                 style:UIAlertActionStyleCancel
+                               handler:^(UIAlertAction*) {
+                                 [weakSelf finishWithURLs:@[] cancelled:YES];
+                               }]];
+
+  // iPad shows the sheet as a popover and needs an anchor.
+  UIViewController* presenter = _viewController;
+  while (presenter.presentedViewController) {
+    presenter = presenter.presentedViewController;
+  }
+  UIPopoverPresentationController* popover = sheet.popoverPresentationController;
+  if (popover) {
+    popover.sourceView = presenter.view;
+    popover.sourceRect = CGRectMake(CGRectGetMidX(presenter.view.bounds),
+                                    CGRectGetMidY(presenter.view.bounds), 1, 1);
+    popover.permittedArrowDirections = 0;
+  }
+  [self presentController:sheet];
 }
 
 - (void)showDocumentPicker {
+  // Files are picked as copies. A file opened in place stays outside the app
+  // sandbox, so the page saw its name but read 0 bytes (NotReadableError).
+  // Folders cannot be copied and keep the open mode.
   if (@available(iOS 14.0, *)) {
     NSArray* documentTypes = _isDirectory ? @[ UTTypeFolder ] : @[ UTTypeItem ];
     if (!_isDirectory && !_allowsOtherFileTypes) {
       documentTypes = _fileUTTypeLists;
     }
     _documentPickerController = [[UIDocumentPickerViewController alloc]
-        initForOpeningContentTypes:documentTypes];
+        initForOpeningContentTypes:documentTypes
+                            asCopy:!_isDirectory];
   } else {
     NSArray* documentTypes = _isDirectory
                                  ? @[ (__bridge NSString*)kUTTypeFolder ]
@@ -159,7 +259,8 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     _documentPickerController = [[UIDocumentPickerViewController alloc]
         initWithDocumentTypes:documentTypes
-                       inMode:UIDocumentPickerModeOpen];
+                       inMode:_isDirectory ? UIDocumentPickerModeOpen
+                                           : UIDocumentPickerModeImport];
 #pragma clang diagnostic pop
   }
   _documentPickerController.allowsMultipleSelection = _allowMultipleFiles;
@@ -169,15 +270,37 @@
   [self presentController:_documentPickerController];
 }
 
+- (NSArray<NSString*>*)cameraMediaTypes {
+  NSMutableArray<NSString*>* types = [NSMutableArray array];
+  if (_wantsImages || !_wantsVideos) {
+    [types addObject:(__bridge NSString*)kUTTypeImage];
+  }
+  if (_wantsVideos) {
+    [types addObject:(__bridge NSString*)kUTTypeMovie];
+  }
+  return types;
+}
+
 - (void)showPhotoPicker {
   if (@available(iOS 14.0, *)) {
     PHPickerConfiguration* configuration =
         [[PHPickerConfiguration alloc] initWithPhotoLibrary:
                                            [PHPhotoLibrary sharedPhotoLibrary]];
-    configuration.filter = [PHPickerFilter anyFilterMatchingSubfilters:@[
-      PHPickerFilter.imagesFilter, PHPickerFilter.videosFilter
-    ]];
+    NSMutableArray<PHPickerFilter*>* filters = [NSMutableArray array];
+    if (_wantsImages || !_wantsVideos) {
+      [filters addObject:PHPickerFilter.imagesFilter];
+    }
+    if (_wantsVideos) {
+      [filters addObject:PHPickerFilter.videosFilter];
+    }
+    configuration.filter = filters.count > 1
+                               ? [PHPickerFilter anyFilterMatchingSubfilters:filters]
+                               : filters.firstObject;
     configuration.selectionLimit = _allowMultipleFiles ? 0 : 1;
+    // Let Photos hand over formats other apps understand (HEIC as JPEG).
+    configuration.preferredAssetRepresentationMode =
+        _keepHEIC ? PHPickerConfigurationAssetRepresentationModeCurrent
+                  : PHPickerConfigurationAssetRepresentationModeCompatible;
     _photoPickerController =
         [[PHPickerViewController alloc] initWithConfiguration:configuration];
     _photoPickerController.delegate = self;
@@ -187,9 +310,7 @@
 
   _imagePickerController = [[UIImagePickerController alloc] init];
   _imagePickerController.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-  _imagePickerController.mediaTypes = @[
-    (__bridge NSString*)kUTTypeImage, (__bridge NSString*)kUTTypeMovie
-  ];
+  _imagePickerController.mediaTypes = [self cameraMediaTypes];
   _imagePickerController.delegate = self;
   [self presentController:_imagePickerController];
 }
@@ -197,9 +318,15 @@
 - (void)showCameraPicker {
   _imagePickerController = [[UIImagePickerController alloc] init];
   _imagePickerController.sourceType = UIImagePickerControllerSourceTypeCamera;
-  _imagePickerController.mediaTypes = @[
-    (__bridge NSString*)kUTTypeImage, (__bridge NSString*)kUTTypeMovie
-  ];
+  NSArray<NSString*>* available = [UIImagePickerController
+      availableMediaTypesForSourceType:UIImagePickerControllerSourceTypeCamera];
+  NSMutableArray<NSString*>* types = [[self cameraMediaTypes] mutableCopy];
+  [types filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(
+                                               NSString* type, NSDictionary*) {
+           return [available containsObject:type];
+         }]];
+  _imagePickerController.mediaTypes =
+      types.count ? types : @[ (__bridge NSString*)kUTTypeImage ];
   _imagePickerController.delegate = self;
   [self presentController:_imagePickerController];
 }
@@ -227,8 +354,12 @@
   } else {
     UIImage* image = info[UIImagePickerControllerOriginalImage];
     NSData* data = UIImageJPEGRepresentation(image, 0.92);
-    resultURL = [self temporaryURLForFilename:@"photo.jpg"];
-    if (![data writeToURL:resultURL atomically:YES]) {
+    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+    formatter.dateFormat = @"yyyyMMdd_HHmmss";
+    resultURL = [self temporaryURLForFilename:
+                          [NSString stringWithFormat:@"IMG_%@.jpg",
+                                                     [formatter stringFromDate:NSDate.date]]];
+    if (!data || !resultURL || ![data writeToURL:resultURL atomically:YES]) {
       resultURL = nil;
     }
   }
@@ -242,6 +373,44 @@
   [self finishWithURLs:@[] cancelled:YES];
 }
 
+// A Live Photo registers a bundle type first, which is not a file a site can
+// use. Take the first plain image or movie type instead.
+- (NSString*)usableTypeForProvider:(NSItemProvider*)provider API_AVAILABLE(ios(14)) {
+  for (NSString* identifier in provider.registeredTypeIdentifiers) {
+    UTType* type = [UTType typeWithIdentifier:identifier];
+    if ([type conformsToType:UTTypeImage] || [type conformsToType:UTTypeMovie]) {
+      return identifier;
+    }
+  }
+  return provider.registeredTypeIdentifiers.firstObject;
+}
+
+// Sites that did not ask for HEIC mostly cannot read it, so Safari sends a
+// JPEG there. Same here, orientation is kept by UIImage.
+- (NSURL*)jpegCopyIfHEIC:(NSURL*)url {
+  NSString* extension = url.pathExtension.lowercaseString;
+  if (_keepHEIC ||
+      !([extension isEqualToString:@"heic"] || [extension isEqualToString:@"heif"])) {
+    return url;
+  }
+  NSURL* converted = nil;
+  @autoreleasepool {
+    UIImage* image = [UIImage imageWithContentsOfFile:url.path];
+    NSData* data = image ? UIImageJPEGRepresentation(image, 0.9) : nil;
+    NSString* base = [url.lastPathComponent stringByDeletingPathExtension];
+    NSURL* destination =
+        [self temporaryURLForFilename:[base stringByAppendingString:@".jpg"]];
+    if (data && destination && [data writeToURL:destination atomically:YES]) {
+      converted = destination;
+    }
+  }
+  if (!converted) {
+    return url;
+  }
+  [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+  return converted;
+}
+
 - (void)picker:(PHPickerViewController*)picker
     didFinishPicking:(NSArray<PHPickerResult*>*)results API_AVAILABLE(ios(14)) {
   [picker dismissViewControllerAnimated:YES completion:nil];
@@ -250,11 +419,15 @@
     return;
   }
 
+  // One slot per result so the files reach the page in the order picked.
+  NSMutableArray* slots = [NSMutableArray arrayWithCapacity:results.count];
+  for (NSUInteger i = 0; i < results.count; ++i) {
+    [slots addObject:NSNull.null];
+  }
   dispatch_group_t group = dispatch_group_create();
-  NSMutableArray<NSURL*>* copiedURLs = [NSMutableArray array];
-  for (PHPickerResult* result in results) {
-    NSItemProvider* provider = result.itemProvider;
-    NSString* type = provider.registeredTypeIdentifiers.firstObject;
+  for (NSUInteger i = 0; i < results.count; ++i) {
+    NSItemProvider* provider = results[i].itemProvider;
+    NSString* type = [self usableTypeForProvider:provider];
     if (!type) {
       continue;
     }
@@ -266,8 +439,9 @@
         if (destination && [[NSFileManager defaultManager] copyItemAtURL:url
                                                                    toURL:destination
                                                                    error:nil]) {
-          @synchronized(copiedURLs) {
-            [copiedURLs addObject:destination];
+          NSURL* ready = [self jpegCopyIfHEIC:destination];
+          @synchronized(slots) {
+            slots[i] = ready;
           }
         }
       }
@@ -275,7 +449,13 @@
     }];
   }
   dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-    [self finishWithURLs:copiedURLs cancelled:copiedURLs.count == 0];
+    NSMutableArray<NSURL*>* urls = [NSMutableArray array];
+    for (id slot in slots) {
+      if ([slot isKindOfClass:NSURL.class]) {
+        [urls addObject:slot];
+      }
+    }
+    [self finishWithURLs:urls cancelled:urls.count == 0];
   });
 }
 
@@ -355,37 +535,46 @@ void SelectFileDialogImpl::SelectFileImpl(
       }
     }
   }
+  // What the page accepts decides which pickers are offered. No accept list
+  // means anything goes, so photos and the camera are offered as well. Only
+  // the page's own tokens count: the extension list built from them also
+  // holds containers like mp4 that audio/* pulls in.
+  bool wants_images = false;
+  bool wants_videos = false;
+  bool all_media = !file_types->accept_types.empty();
+  bool keep_heic = false;
   for (const std::u16string& accept : file_types->accept_types) {
-    std::string token = base::UTF16ToUTF8(accept);
-    if (!base::StartsWith(token, "image/", base::CompareCase::INSENSITIVE_ASCII) &&
-        !base::StartsWith(token, "video/", base::CompareCase::INSENSITIVE_ASCII)) {
-      // Extension-only media accepts are handled by UTType conformance below.
-      if (token.empty() || token.front() != '.') {
-        media_only = false;
-      }
-    }
-  }
-  if (media_only && !file_uttype_lists.count) {
-    media_only = false;
-  }
-  if (media_only) {
-    for (id file_type in file_uttype_lists) {
-      bool is_media = false;
+    const std::string token = base::ToLowerASCII(base::UTF16ToUTF8(accept));
+    bool is_image = base::StartsWith(token, "image/");
+    bool is_video = base::StartsWith(token, "video/");
+    if (token.size() > 1 && token.front() == '.') {
+      NSString* extension = base::SysUTF8ToNSString(token.substr(1));
       if (@available(iOS 14.0, *)) {
-        UTType* ut = (UTType*)file_type;
-        is_media = [ut conformsToType:UTTypeImage] ||
-                   [ut conformsToType:UTTypeMovie];
+        UTType* ut = [UTType typeWithFilenameExtension:extension];
+        is_image = [ut conformsToType:UTTypeImage];
+        is_video = [ut conformsToType:UTTypeMovie];
       } else {
-        CFStringRef ut = (__bridge CFStringRef)file_type;
-        is_media = UTTypeConformsTo(ut, kUTTypeImage) ||
-                   UTTypeConformsTo(ut, kUTTypeMovie);
-      }
-      if (!is_media) {
-        media_only = false;
-        break;
+        base::apple::ScopedCFTypeRef<CFStringRef> ut(
+            UTTypeCreatePreferredIdentifierForTag(
+                kUTTagClassFilenameExtension,
+                base::SysUTF8ToCFStringRef(token.substr(1)).get(), nullptr));
+        is_image = ut && UTTypeConformsTo(ut.get(), kUTTypeImage);
+        is_video = ut && UTTypeConformsTo(ut.get(), kUTTypeMovie);
       }
     }
+    wants_images |= is_image;
+    wants_videos |= is_video;
+    all_media &= is_image || is_video;
+    if (token.find("heic") != std::string::npos ||
+        token.find("heif") != std::string::npos) {
+      keep_heic = true;
+    }
   }
+  if (file_types->accept_types.empty()) {
+    wants_images = wants_videos = true;
+  }
+  const bool media_allowed = wants_images || wants_videos;
+  media_only = all_media;
   if (file_types->include_all_files || file_types->extensions.empty()) {
     allows_other_file_types = true;
   }
@@ -399,7 +588,11 @@ void SelectFileDialogImpl::SelectFileImpl(
                           allowsOtherFileTypes:allows_other_file_types
                                    isDirectory:directory
                                       mediaOnly:media_only
-                                useMediaCapture:file_types->use_media_capture];
+                                useMediaCapture:file_types->use_media_capture
+                                   mediaAllowed:media_allowed
+                                    wantsImages:wants_images
+                                    wantsVideos:wants_videos
+                                       keepHEIC:keep_heic];
   [native_file_dialog_ showFilePickerMenu];
 }
 

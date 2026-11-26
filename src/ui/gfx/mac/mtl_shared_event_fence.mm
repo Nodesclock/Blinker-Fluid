@@ -52,8 +52,8 @@ id<MTLSharedEvent> MTLSharedEventFence::GetSharedEvent() const {
 
 bool MTLSharedEventFence::HasSignaled() const {
 #if BUILDFLAG(IS_IOS)
-  // Shared-event fences cannot be created on iOS 11. Treat an unexpected
-  // empty fence as complete without messaging the unavailable Metal object.
+  // На iOS 11 shared event fence не створиш тож порожній
+  // fence вважаєм готовим
   if (!@available(iOS 12.0, *)) {
     return true;
   }
