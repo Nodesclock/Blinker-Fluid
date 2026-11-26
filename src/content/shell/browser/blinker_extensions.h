@@ -5,38 +5,61 @@
 #ifndef CONTENT_SHELL_BROWSER_BLINKER_EXTENSIONS_H_
 #define CONTENT_SHELL_BROWSER_BLINKER_EXTENSIONS_H_
 
+#include <string>
+#include <string_view>
+
 class GURL;
 
 namespace content {
 
+class BrowserContext;
 class WebContents;
 
-// The user agent sent while desktop mode is on. Shared so the toggle and the
-// per-navigation restore below cannot drift apart.
-extern const char kBlinkDesktopUserAgent[];
+const std::string& BlinkDesktopUserAgent();
 
-// Applies the per-host page-zoom (stored under "BlinkZoom_<host>" in user
-// defaults) to `contents` by setting the root element's CSS zoom. Called on
-// every committed navigation.
+enum BlinkUserAgentIdentityKind {
+  kBlinkIdentityChromeAndroid = 0,
+  kBlinkIdentitySafariIOS = 1,
+  kBlinkIdentityChromeIOS = 2,
+};
+
+int BlinkUserAgentIdentity();
+
+// Для Chrome на Android порожній рядок, це і так UA за замовчуванням
+std::string BlinkIdentityUserAgent(int identity);
+
+void BlinkApplyIdentity(WebContents* contents);
+
+bool BlinkIsDesktopSite(WebContents* contents);
+
+void BlinkSetSiteMode(WebContents* contents, const GURL& url, bool desktop);
+
+GURL BlinkURLForSiteMode(const GURL& url, bool desktop);
+
 void BlinkApplyPageZoom(WebContents* contents, const GURL& url);
 
-// Applies `percent` to `contents` immediately, without reading the stored pref
-// (used when the user picks a zoom, to avoid a stale cfprefsd read-after-write).
+// Не читає збережене значення, бо cfprefsd одразу після запису віддає старе
 void BlinkSetPageZoom(WebContents* contents, int percent);
+int BlinkDefaultZoomPercent();
 
-// Injects the content filter's element-hiding CSS (cosmetic ad/tracker filtering)
-// for the page's host. Called on every committed navigation.
+int BlinkerPageZoomPercent(WebContents* contents);
+
+// Ще й запам'ятовує для хоста, інакше наступна навігація скине
+// chrome.tabs.setZoom
+void BlinkerSetPageZoomPercent(WebContents* contents, int percent);
+
+std::string BlinkerSearchURLForQuery(std::string_view query);
+
 void BlinkInjectCosmeticFilters(WebContents* contents, const GURL& url);
 
-// Applies the per-host desktop-mode choice (stored under
-// "BlinkDesktopMode_<host>") to `contents`. The toggle already recorded the
-// preference per host but nothing read it back, so desktop mode was lost on
-// the next navigation and on relaunch. Called on every committed navigation.
+// Приватні вкладки звичайний профіль не читають і не пишуть
 void BlinkApplySiteMode(WebContents* contents, const GURL& url);
 
-// Clears cookies, storage and cache for a single origin, leaving every other
-// site signed in. Backs the per-site "Clear Data" action.
 void BlinkClearSiteData(WebContents* contents, const GURL& url);
+void BlinkClearAllSiteData(BrowserContext* context);
+
+void BlinkerApplySecureDnsSetting();
+bool BlinkerIsValidSecureDnsTemplate(const std::string& value);
 
 }  // namespace content
 
