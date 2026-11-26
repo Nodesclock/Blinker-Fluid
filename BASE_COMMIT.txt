@@ -1,8 +1,12 @@
-Chromium base commit: 31dce68b925c2b8efc93df832a86a7c0d03e3fa2
-Version: 149.0.7821.0
+Chromium base commit: 4d790f9eb4c8abe65b8aaa3feba664e7c734ba56
+Version: 159.0.8154.13
 
-V8 base commit (for v8/ paths): 642bb71b116595bcc50979c0e2d66c06fe0959b5
+V8 base commit (for v8/ paths): 4593f4dc1e9b7c400645778417f394ba6d52f64b
+ANGLE base commit (for third_party/angle/ paths): 0f0b90f0b5bf61cc630870d5d4bf0c07d906e975
+Dawn base commit (for third_party/dawn/ paths): 69bfa246b5d7369f73c807d37648e25370f4db40
+Skia base commit (for third_party/skia/ paths): 8a65fa27c104d1bb5a58df5ec3e0c1655053fcf6
 
 The files under src/ are drop-in replacements for the same paths in a Chromium
-checkout at the commit above (V8 is a separate checkout under src/v8 at its own
-commit). Sync a Chromium tree to that commit, overlay src/, then build.
+checkout at the commit above. V8, ANGLE, Dawn and Skia are separate checkouts
+inside it, and gclient sync puts them at the commits listed here. Sync a
+Chromium tree to that commit, overlay src/, then build.
