@@ -1,0 +1,32 @@
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+use_blink = true
+is_debug = false
+is_component_build = false
+ios_enable_code_signing = false
+symbol_level = 0
+mac_sdk_min = "14.5"
+ios_deployment_target = "12.0"
+ios_content_shell_bundle_identifier = "com.nodesclock.blinkerfluid.ios12"
+treat_warnings_as_errors = false
+v8_enable_sandbox = false
+v8_enable_pointer_compression = false
+v8_enable_drumbrake = false
+cppgc_enable_caged_heap = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+dcheck_always_on = false
+content_shell_version = "159.0.8154.13"
+content_shell_major_version = "159"
+blinker_legacy_ios_address_space = true
+
+# iPhone 6 Plus після dyld і твіків не може надійно зарезервувати сусідню
+# клітку BRP. Тому тут повний звичайний пул, а пулу BackupRefPtr нема.
+enable_backup_ref_ptr_support = false
+
+# Режим нижчих лімітів обмежує рядки і масиви мільйоном елементів, і великі
+# скрипти (Reddit) падали на фатальній перевірці. Таблицю JS dispatch на 16 МБ
+# тепер задає v8/src/common/globals.h.
+v8_lower_limits_mode = false
+blinker_enable_diagnostics = false

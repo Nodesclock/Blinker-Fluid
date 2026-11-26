@@ -11,24 +11,21 @@ ios_deployment_target = "14.0"
 ios_content_shell_bundle_identifier = "com.nodesclock.blinkerfluid"
 treat_warnings_as_errors = false
 
-# Avoid V8's sandbox reservation while retaining pointer compression.
+# Без резерву під пісочницю V8, стиснення вказівників лишається.
 v8_enable_sandbox = false
 v8_enable_pointer_compression = true
-v8_enable_drumbrake = true
+v8_enable_drumbrake = false
 
-# Avoid cppgc's large caged-heap reservation.
+# Без великого резерву під caged heap у cppgc.
 cppgc_enable_caged_heap = false
 
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
 dcheck_always_on = false
 
-# Real Chromium version instead of content_shell's "999.77.34.5" placeholder.
-# It lands in the User-Agent (CriOS/<ver>) and the Sec-CH-UA client hints, and
-# Google's disallowed_useragent check plus its bot heuristics score UA
-# plausibility -- a major version of 999 reads as a spoof, which is what
-# produced "this browser may not be secure" on Google sign-in and the constant
-# captchas.
-content_shell_version = "149.0.7821.0"
-content_shell_major_version = "149"
+# Справжня версія Chromium замість 999.77.34.5 з content_shell. Вона йде в
+# User Agent і Sec-CH-UA, а з версією 999 Google вважав браузер підробкою, на
+# вході показував "this browser may not be secure" і сипав капчі.
+content_shell_version = "159.0.8154.13"
+content_shell_major_version = "159"
 blinker_enable_diagnostics = false
