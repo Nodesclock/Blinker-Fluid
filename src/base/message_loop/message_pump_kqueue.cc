@@ -14,15 +14,14 @@
 #include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/mac/mac_util.h"
+#include "base/message_loop/message_pump_wakeup_counter.h"
 #include "base/notreached.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/task/task_features.h"
 #include "base/time/time_override.h"
 #include "build/blink_buildflags.h"
 
-// Patched: BrowserEngineCore/BEkevent.h ships in the iOS 18 SDK (Xcode 16) and
-// is absent from the iOS 17.5 SDK. On the Simulator there is no browser-engine
-// sandbox, so platform_kevent64() falls back to the standard kevent64().
+// BrowserEngineCore/BEkevent.h є не в усіх SDK, тож завжди kevent64()
 
 namespace base {
 
@@ -311,7 +310,7 @@ bool MessagePumpKqueue::WatchFileDescriptor(int fd,
   return true;
 }
 
-void MessagePumpKqueue::SetWakeupTimerEvent(const base::TimeTicks& wakeup_time,
+void MessagePumpKqueue::SetWakeupTimerEvent(base::TimeTicks wakeup_time,
                                             base::TimeDelta leeway,
                                             kevent64_s* timer_event) {
   // The ident of the wakeup timer. There's only the one timer as the pair
@@ -434,7 +433,11 @@ bool MessagePumpKqueue::DoInternalWork(Delegate* delegate,
   }
 
   PCHECK(rv > 0) << "kevent64";
-  return ProcessEvents(delegate, static_cast<size_t>(rv));
+  bool did_work = ProcessEvents(delegate, static_cast<size_t>(rv));
+  if (did_work) {
+    MessagePumpWakeupCounter::GetForCurrentThread().RecordWakeup();
+  }
+  return did_work;
 }
 
 bool MessagePumpKqueue::ProcessEvents(Delegate* delegate, size_t count) {
@@ -519,9 +522,8 @@ bool MessagePumpKqueue::ProcessEvents(Delegate* delegate, size_t count) {
   return did_work;
 }
 
-void MessagePumpKqueue::MaybeUpdateWakeupTimer(
-    const base::TimeTicks& wakeup_time,
-    base::TimeDelta leeway) {
+void MessagePumpKqueue::MaybeUpdateWakeupTimer(base::TimeTicks wakeup_time,
+                                               base::TimeDelta leeway) {
   if (wakeup_time == scheduled_wakeup_time_) {
     // No change in the timer setting necessary.
     return;

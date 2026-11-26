@@ -209,13 +209,8 @@ int BuildAndEvaluateSecTrustRef(CFArrayRef cert_array,
   if (__builtin_available(iOS 15, *)) {
     verified_chain->reset(SecTrustCopyCertificateChain(trust_ref->get()));
   } else {
-    // iOS-14 back-deploy: SecTrustCopyCertificateChain() is iOS 15+. At a 14.0
-    // deployment target it is weak-imported, so on iOS 14 it resolves to NULL
-    // and calling it jumps to 0x0 (SIGSEGV) on the first HTTPS verification.
-    // Rebuild the leaf-first chain array by hand from the pre-15 per-index
-    // accessors (deprecated on 15+, but present since iOS 2 and only reached on
-    // < 15). GetCertChainInfo() treats index 0 as the leaf, same as the modern
-    // call, so downstream handling is unchanged.
+    // SecTrustCopyCertificateChain() є з iOS 15, на iOS 14 це NULL.
+    // Ланцюжок збираємо вручну
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     const CFIndex chain_count = SecTrustGetCertificateCount(trust_ref->get());
@@ -303,18 +298,8 @@ CertStatus CertVerifyProcIOS::GetCertFailureStatusFromError(CFErrorRef error) {
 }
 
 #if !defined(__IPHONE_12_0) || __IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_12_0
-// The iOS APIs don't expose an API-stable set of reasons for certificate
-// validation failures. However, internally, the reason is tracked, and it's
-// converted to user-facing localized strings.
-//
-// In the absence of a consistent API, convert the English strings to their
-// localized counterpart, and then compare that with the error properties. If
-// they're equal, it's a strong sign that this was the cause for the error.
-// While this will break if/when iOS changes the contents of these strings,
-// it's sufficient enough for now.
-//
-// TODO(rsleevi): https://crbug.com/601915 - Use a less brittle solution when
-// possible.
+// iOS не дає стабільного API для причин помилки, порівнюємо локалізовані рядки.
+// Зламається якщо Apple їх поміняє
 // static
 CertStatus CertVerifyProcIOS::GetCertFailureStatusFromTrust(SecTrustRef trust) {
   CertStatus reason = 0;
@@ -458,7 +443,6 @@ int CertVerifyProcIOS::VerifyInternal(X509Certificate* cert,
     return ERR_FAILED;
   }
 
-  // TODO(rsleevi): Support CRLSet revocation.
   if (!is_trusted) {
     if (__builtin_available(iOS 12.0, *)) {
       verify_result->cert_status |=
@@ -481,9 +465,6 @@ int CertVerifyProcIOS::VerifyInternal(X509Certificate* cert,
               GetCertFailureStatusFromTrust(trust_ref.get());
       }
 #else
-      // It should be impossible to reach this code, but if somehow it is
-      // reached it would allow any certificate as valid since no errors would
-      // be added to cert_status. Therefore, add a NOTREACHED() as a fail safe.
       NOTREACHED();
 #endif
     }

@@ -31,7 +31,6 @@ GENERATE_STRONG_OBJC_TYPE(UIPress)
 #else
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-// Runtime creation and access are restricted to iOS 17.4+ call sites.
 GENERATE_STRONG_OBJC_TYPE(BEKeyEntry)
 #pragma clang diagnostic pop
 #endif  // BUILDFLAG(IS_IOS_TVOS)

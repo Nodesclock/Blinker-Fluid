@@ -56,11 +56,6 @@ void PopulateUIWindow(UIWindow* window) {
   // root view controller. Set an empty one here.
   window.rootViewController = [[UIViewController alloc] init];
 }
-
-bool IsSceneStartupEnabled() {
-  return [NSBundle.mainBundle.infoDictionary
-      objectForKey:@"UIApplicationSceneManifest"];
-}
 }  // namespace
 
 @interface UIApplication (Testing)
@@ -100,9 +95,7 @@ bool IsSceneStartupEnabled() {
 
 @end
 
-@interface ChromeUnitTestDelegate : NSObject <GoogleTestRunnerDelegate> {
-  UIWindow* __strong _window;
-}
+@interface ChromeUnitTestDelegate : NSObject <GoogleTestRunnerDelegate>
 - (void)runTests;
 @end
 
@@ -133,32 +126,7 @@ bool IsSceneStartupEnabled() {
   // calls override this behavior by ensuring that the software keyboard is
   // always shown.
   [[UIKeyboardImpl sharedInstance] setAutomaticMinimizationEnabled:NO];
-  if (@available(iOS 15, *)) {
-  } else {
-    [[UIKeyboardImpl sharedInstance] setSoftwareKeyboardShownByTouch:YES];
-  }
 #endif  // TARGET_OS_SIMULATOR
-
-  if (!IsSceneStartupEnabled()) {
-    if (@available(iOS 13.0, *)) {
-      UIWindowScene* scene = nil;
-      for (UIScene* connectedScene in UIApplication.sharedApplication
-               .connectedScenes) {
-        scene = base::apple::ObjCCast<UIWindowScene>(connectedScene);
-        if (scene) {
-          break;
-        }
-      }
-      if (!scene) {
-        return NO;
-      }
-      _window = [[UIWindow alloc] initWithWindowScene:scene];
-    } else {
-      _window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    }
-    _window.frame = UIScreen.mainScreen.bounds;
-    PopulateUIWindow(_window);
-  }
 
   if ([self shouldRedirectOutputToFile]) {
     [self redirectOutput];
@@ -177,16 +145,17 @@ bool IsSceneStartupEnabled() {
 // Returns true if the gtest output should be redirected to a file, then sent
 // to NSLog when complete. This redirection is used because gtest only writes
 // output to stdout, but results must be written to NSLog in order to show up in
-// the device log that is retrieved from the device by the host.
+// the device log that is retrieved from the device by the host. Output is not
+// redirected for simulators or tvOS.
 - (BOOL)shouldRedirectOutputToFile {
-#if !TARGET_OS_SIMULATOR
+#if TARGET_OS_SIMULATOR || BUILDFLAG(IS_IOS_TVOS)
+  return NO;
+#else
   // Tests in XCTest mode don't need to redirect output to a file because the
   // test result parser analyzes console output.
   return !base::ShouldRunIOSUnittestsWithXCTest() &&
          !base::debug::BeingDebugged();
-#else
-  return NO;
-#endif  // TARGET_OS_SIMULATOR
+#endif  // TARGET_OS_SIMULATOR || BUILDFLAG(IS_IOS_TVOS)
 }
 
 // Returns the path to the directory to store gtest output files.
@@ -263,7 +232,6 @@ bool IsSceneStartupEnabled() {
   // a chance to initialize and no test results will be seen.
   [NSThread sleepUntilDate:[NSDate dateWithTimeIntervalSinceNow:2.0]];
 #endif
-  _window = nil;
 
 #if !BUILDFLAG(IS_IOS_APP_EXTENSION)
   // Use the hidden selector to try and cleanly take down the app (otherwise

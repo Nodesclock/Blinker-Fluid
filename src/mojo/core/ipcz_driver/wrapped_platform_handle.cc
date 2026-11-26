@@ -24,9 +24,6 @@
 
 #if BUILDFLAG(IS_APPLE)
 #include <mach/mach.h>
-// Patched: <sys/fileport.h> ships in the iOS 18 SDK (Xcode 16) and is absent
-// from the iOS 17.5 SDK. These symbols exist in libSystem at runtime; declare
-// them directly so the iOS-Simulator Blink build can link against them.
 extern "C" {
 int fileport_makeport(int fd, mach_port_t* port);
 int fileport_makefd(mach_port_t port);
@@ -184,7 +181,8 @@ scoped_refptr<WrappedPlatformHandle> WrappedPlatformHandle::Deserialize(
   const auto& header =
       *reinterpret_cast<const WrappedPlatformHandleHeader*>(data.data());
   const size_t header_size = header.size;
-  if (header_size < sizeof(header) || header_size % 8 != 0) {
+  if (header_size < sizeof(header) || header_size > data.size() ||
+      header_size % 8 != 0) {
     return nullptr;
   }
   if (!ValidateEnum(header.type)) {

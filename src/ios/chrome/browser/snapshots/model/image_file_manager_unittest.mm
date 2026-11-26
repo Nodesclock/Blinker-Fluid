@@ -8,16 +8,11 @@
 
 #import "base/apple/foundation_util.h"
 #import "base/files/file_path.h"
-#import "base/files/file_util.h"
 #import "base/files/scoped_temp_dir.h"
-#import "base/functional/bind.h"
-#import "base/functional/callback_helpers.h"
 #import "base/run_loop.h"
-#import "base/strings/sys_string_conversions.h"
-#import "base/time/time.h"
+#import "base/test/scoped_feature_list.h"
 #import "components/sessions/core/session_id.h"
 #import "ios/chrome/browser/snapshots/model/features.h"
-#import "ios/chrome/browser/snapshots/model/legacy_image_file_manager.h"
 #import "ios/chrome/browser/snapshots/model/model_swift.h"
 #import "ios/chrome/browser/snapshots/model/snapshot_id.h"
 #import "ios/chrome/browser/snapshots/model/snapshot_id_wrapper.h"
@@ -28,7 +23,7 @@
 namespace {
 
 const NSUInteger kSnapshotCount = 10;
-const NSUInteger kSnapshotPixelSize = 8;
+const NSUInteger kSnapshotPixelSize = 10;
 
 // Guesses the order of the color channels in the image.
 // Supports RGB, BGR, RGBA, BGRA, ARGB, ABGR.
@@ -87,10 +82,13 @@ void ExpectSimilarImages(CGImageRef image1, CGImageRef image2) {
   base::span<const uint8_t> image2_span =
       base::apple::NSDataToSpan((__bridge NSData*)image2_data.get());
 
-  // Colors may not be axactly the same due to compression or roundind
-  // errors, thus allow a small difference.
+  // Colors may not be exactly the same due to JPEG compression or rounding
+  // errors (e.g., up to 2 units difference on iPhone 17 hardware), thus allow a
+  // small difference.
+  static constexpr uint8_t kMaxColorComponentDifference = 2;
   for (size_t index = 0; index < kColorComponents; ++index) {
-    EXPECT_NEAR(image1_span[indices1[index]], image2_span[indices2[index]], 1);
+    EXPECT_NEAR(image1_span[indices1[index]], image2_span[indices2[index]],
+                kMaxColorComponentDifference);
   }
 }
 
@@ -108,299 +106,6 @@ void ExpectImageAtPathSimilarToReference(NSString* path, UIImage* reference) {
   ExpectSimilarImages(image.CGImage, reference.CGImage);
 }
 
-class LegacyImageFileManagerTest : public PlatformTest {
- protected:
-  void SetUp() override {
-    PlatformTest::SetUp();
-    ASSERT_TRUE(CreateImageFileManager());
-  }
-
-  void TearDown() override {
-    ClearAllImages();
-    [image_file_manager_ shutdown];
-    image_file_manager_ = nil;
-    PlatformTest::TearDown();
-  }
-
-  // Build an array of snapshot IDs and an array of UIImages filled with
-  // random colors.
-  [[nodiscard]] bool CreateImageFileManager() {
-    DCHECK(!image_file_manager_);
-    if (!scoped_temp_directory_.CreateUniqueTempDir()) {
-      return false;
-    }
-
-    image_file_manager_ = [[LegacyImageFileManager alloc]
-        initWithStoragePath:scoped_temp_directory_.GetPath()];
-
-    CGFloat scale = [SnapshotImageScale floatImageScaleForDevice];
-
-    srand(1);
-
-    for (NSUInteger i = 0; i < kSnapshotCount; ++i) {
-      test_images_.insert(std::make_pair(
-          SnapshotID(SessionID::NewUnique().id()), GenerateRandomImage(scale)));
-    }
-
-    return true;
-  }
-
-  LegacyImageFileManager* GetImageFileManager() {
-    DCHECK(image_file_manager_);
-    return image_file_manager_;
-  }
-
-  // Generates an image of `scale`, filled with a random color.
-  UIImage* GenerateRandomImage(CGFloat scale) {
-    CGSize size = CGSizeMake(kSnapshotPixelSize, kSnapshotPixelSize);
-    UIGraphicsImageRendererFormat* format =
-        [UIGraphicsImageRendererFormat preferredFormat];
-    format.scale = scale;
-    format.opaque = NO;
-
-    UIGraphicsImageRenderer* renderer =
-        [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
-
-    return [renderer
-        imageWithActions:^(UIGraphicsImageRendererContext* UIContext) {
-          CGContextRef context = UIContext.CGContext;
-          CGFloat r = rand() / CGFloat(RAND_MAX);
-          CGFloat g = rand() / CGFloat(RAND_MAX);
-          CGFloat b = rand() / CGFloat(RAND_MAX);
-          CGContextSetRGBStrokeColor(context, r, g, b, 1.0);
-          CGContextSetRGBFillColor(context, r, g, b, 1.0);
-          CGContextFillRect(context, CGRectMake(0.0, 0.0, kSnapshotPixelSize,
-                                                kSnapshotPixelSize));
-        }];
-  }
-
-  // Flushes all the runloops internally used by the snapshot storage. This is
-  // done by asking to retrieve a non-existent image from disk and blocking
-  // until the callback is invoked.
-  void FlushRunLoops() {
-    if (!image_file_manager_) {
-      return;
-    }
-
-    base::RunLoop run_loop;
-    [image_file_manager_
-        readImageWithSnapshotID:SnapshotID(SessionID::NewUnique().id())
-                     completion:base::BindOnce(base::IgnoreArgs<UIImage*>(
-                                    run_loop.QuitClosure()))];
-    run_loop.Run();
-  }
-
-  // This function removes all snapshots stored in disk.
-  void ClearAllImages() {
-    if (!image_file_manager_) {
-      return;
-    }
-
-    [image_file_manager_ removeAllImages];
-    FlushRunLoops();
-
-    __block BOOL foundImage = NO;
-    __block NSUInteger numCallbacks = 0;
-    for (auto [snapshot_id, _] : test_images_) {
-      const base::FilePath path =
-          [image_file_manager_ imagePathForSnapshotID:snapshot_id];
-
-      // Checks that the snapshot is not on disk.
-      EXPECT_FALSE(base::PathExists(path));
-
-      // Check that the snapshot is not in the dictionary.
-      [image_file_manager_
-          readImageWithSnapshotID:snapshot_id
-                       completion:base::BindOnce(^(UIImage* image) {
-                         ++numCallbacks;
-                         if (image) {
-                           foundImage = YES;
-                         }
-                       })];
-    }
-
-    // Expect that all the callbacks ran and that none retrieved an image.
-    FlushRunLoops();
-
-    EXPECT_EQ(test_images_.size(), numCallbacks);
-    EXPECT_FALSE(foundImage);
-  }
-
-  web::WebTaskEnvironment task_environment_;
-  base::ScopedTempDir scoped_temp_directory_;
-  LegacyImageFileManager* image_file_manager_;
-  std::map<SnapshotID, UIImage*> test_images_;
-};
-
-// Tests that the color of all snapshots in the storage reloaded from disk.
-TEST_F(LegacyImageFileManagerTest, CheckImageColors) {
-  LegacyImageFileManager* file_manager = GetImageFileManager();
-  ASSERT_TRUE(file_manager);
-
-  // Put all images to disk.
-  for (auto [snapshot_id, image] : test_images_) {
-    [file_manager writeImage:image withSnapshotID:snapshot_id];
-  }
-  FlushRunLoops();
-
-  for (auto [snapshot_id, reference_image] : test_images_) {
-    // Check that images are on the disk.
-    const base::FilePath path =
-        [file_manager imagePathForSnapshotID:snapshot_id];
-    EXPECT_TRUE(base::PathExists(path));
-
-    // Check image colors by comparing the first pixel against the reference
-    // image.
-    ExpectImageAtPathSimilarToReference(base::apple::FilePathToNSString(path),
-                                        reference_image);
-  }
-}
-
-// Tests that old images are deleted.
-TEST_F(LegacyImageFileManagerTest, PurgeImagesOlderThan) {
-  LegacyImageFileManager* file_manager = GetImageFileManager();
-  ASSERT_TRUE(file_manager);
-
-  // Put all images in the storage.
-  for (auto [snapshot_id, image] : test_images_) {
-    [file_manager writeImage:image withSnapshotID:snapshot_id];
-  }
-
-  ASSERT_FALSE(test_images_.empty());
-  std::vector<SnapshotID> liveSnapshotIDs = {test_images_.begin()->first};
-
-  // Purge the storage.
-  [file_manager purgeImagesOlderThan:(base::Time::Now() - base::Hours(1))
-                             keeping:liveSnapshotIDs];
-  FlushRunLoops();
-
-  // Check that nothing has been deleted.
-  for (auto [snapshot_id, _] : test_images_) {
-    // Check that images are on the disk.
-    const base::FilePath path =
-        [file_manager imagePathForSnapshotID:snapshot_id];
-    EXPECT_TRUE(base::PathExists(path));
-  }
-
-  // Purge the storage.
-  [file_manager purgeImagesOlderThan:base::Time::Now() keeping:liveSnapshotIDs];
-  FlushRunLoops();
-
-  // Check that the file have been deleted.
-  for (auto [snapshot_id, _] : test_images_) {
-    // Check that images are on the disk.
-    const base::FilePath path =
-        [file_manager imagePathForSnapshotID:snapshot_id];
-    if (snapshot_id == *liveSnapshotIDs.begin()) {
-      EXPECT_TRUE(base::PathExists(path));
-    } else {
-      EXPECT_FALSE(base::PathExists(path));
-    }
-  }
-}
-
-// Tests that image size and scale are preserved when writing and reading
-// from disk.
-TEST_F(LegacyImageFileManagerTest, SizeAndScalePreservation) {
-  LegacyImageFileManager* file_manager = GetImageFileManager();
-  ASSERT_TRUE(file_manager);
-
-  // Create an image with the expected snapshot scale.
-  CGFloat scale = [SnapshotImageScale floatImageScaleForDevice];
-  UIImage* image = GenerateRandomImage(scale);
-
-  // Add the image to the storage and ensure the file is written to disk.
-  const SnapshotID kSnapshotID(SessionID::NewUnique().id());
-  [file_manager writeImage:image withSnapshotID:kSnapshotID];
-  FlushRunLoops();
-
-  // Retrive the image and have the callback verify the size and scale.
-  __block BOOL callbackComplete = NO;
-  [file_manager
-      readImageWithSnapshotID:kSnapshotID
-                   completion:base::BindOnce(^(UIImage* imageFromDisk) {
-                     EXPECT_EQ(image.size.width, imageFromDisk.size.width);
-                     EXPECT_EQ(image.size.height, imageFromDisk.size.height);
-                     EXPECT_EQ(image.scale, imageFromDisk.scale);
-                     callbackComplete = YES;
-                   })];
-  FlushRunLoops();
-  EXPECT_TRUE(callbackComplete);
-}
-
-// Tests that retina-scale images are deleted properly.
-TEST_F(LegacyImageFileManagerTest, DeleteRetinaImages) {
-  LegacyImageFileManager* file_manager = GetImageFileManager();
-  ASSERT_TRUE(file_manager);
-
-  if ([SnapshotImageScale floatImageScaleForDevice] != 2.0) {
-    return;
-  }
-
-  // Create an image with retina scale.
-  UIImage* image = GenerateRandomImage(2.0);
-
-  // Add the image and ensure the file is written to disk.
-  const SnapshotID kSnapshotID(SessionID::NewUnique().id());
-  [file_manager writeImage:image withSnapshotID:kSnapshotID];
-  FlushRunLoops();
-
-  // Verify the file was written with @2x in the file name.
-  base::FilePath retinaFile = [file_manager imagePathForSnapshotID:kSnapshotID];
-  EXPECT_TRUE(base::PathExists(retinaFile));
-
-  // Delete the image and ensure the file is removed.
-  [file_manager removeImageWithSnapshotID:kSnapshotID];
-  FlushRunLoops();
-
-  EXPECT_FALSE(base::PathExists(retinaFile));
-}
-
-// Tests that an image is immediately deleted when calling
-// `-removeImageWithSnapshotID:`.
-TEST_F(LegacyImageFileManagerTest, ImageDeleted) {
-  LegacyImageFileManager* file_manager = GetImageFileManager();
-  ASSERT_TRUE(file_manager);
-
-  UIImage* image = GenerateRandomImage(0);
-  const SnapshotID kSnapshotID(SessionID::NewUnique().id());
-  [file_manager writeImage:image withSnapshotID:kSnapshotID];
-
-  base::FilePath image_path = [file_manager imagePathForSnapshotID:kSnapshotID];
-
-  // Remove the image and ensure the file is removed.
-  [file_manager removeImageWithSnapshotID:kSnapshotID];
-  FlushRunLoops();
-
-  EXPECT_FALSE(base::PathExists(image_path));
-}
-
-// Tests that all images are deleted when calling `-removeAllImages`.
-TEST_F(LegacyImageFileManagerTest, AllImagesDeleted) {
-  LegacyImageFileManager* file_manager = GetImageFileManager();
-  ASSERT_TRUE(file_manager);
-
-  UIImage* image = GenerateRandomImage(0);
-  const SnapshotID kSnapshotID1(SessionID::NewUnique().id());
-  const SnapshotID kSnapshotID2(SessionID::NewUnique().id());
-  [file_manager writeImage:image withSnapshotID:kSnapshotID1];
-  [file_manager writeImage:image withSnapshotID:kSnapshotID2];
-  base::FilePath image_1_path =
-      [file_manager imagePathForSnapshotID:kSnapshotID1];
-  base::FilePath image_2_path =
-      [file_manager imagePathForSnapshotID:kSnapshotID2];
-
-  // Remove all images and ensure the files are removed.
-  [file_manager removeAllImages];
-  FlushRunLoops();
-
-  EXPECT_FALSE(base::PathExists(image_1_path));
-  EXPECT_FALSE(base::PathExists(image_2_path));
-}
-
-// This is a duplicated test class of LegacyImageFileManagerTest to test
-// ImageFileManager. We can't use value-parameterized tests because some
-// public APIs are different from LegacyImageFileManager.
 class ImageFileManagerTest : public PlatformTest {
  protected:
   void SetUp() override {
@@ -636,6 +341,37 @@ TEST_F(ImageFileManagerTest, SizeAndScalePreservation) {
 
   FlushRunLoops();
   EXPECT_TRUE(callbackComplete);
+}
+
+// Tests that downsampling is performed asynchronously and preserves point
+// dimensions while reducing the image scale.
+TEST_F(ImageFileManagerTest, DownsampleImage) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(kSnapshotDownsampleImage);
+
+  ImageFileManager* file_manager = GetImageFileManager();
+  ASSERT_TRUE(file_manager);
+
+  UIImage* image = GenerateRandomImage(2.0);
+  SnapshotIDWrapper* snapshot_id = [[SnapshotIDWrapper alloc]
+      initWithSnapshotID:SnapshotID(SessionID::NewUnique().id())];
+  __block UIImage* optimized_image = nil;
+  [file_manager writeWithImage:image
+                    snapshotID:snapshot_id
+                    completion:^(UIImage* result) {
+                      EXPECT_TRUE([NSThread isMainThread]);
+                      optimized_image = result;
+                    }];
+  FlushRunLoops();
+
+  ASSERT_TRUE(optimized_image);
+  EXPECT_EQ(image.size.width, optimized_image.size.width);
+  EXPECT_EQ(image.size.height, optimized_image.size.height);
+  EXPECT_DOUBLE_EQ(image.scale * 0.7, optimized_image.scale);
+  EXPECT_EQ(CGImageGetWidth(image.CGImage) * 0.7,
+            CGImageGetWidth(optimized_image.CGImage));
+  EXPECT_EQ(CGImageGetHeight(image.CGImage) * 0.7,
+            CGImageGetHeight(optimized_image.CGImage));
 }
 
 // Tests that retina-scale images are deleted properly.

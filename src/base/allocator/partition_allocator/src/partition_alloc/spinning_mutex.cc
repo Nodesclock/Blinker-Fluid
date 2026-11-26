@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "partition_alloc/build_config.h"
+#include "partition_alloc/buildflags.h"
 #include "partition_alloc/partition_alloc_base/compiler_specific.h"
 #include "partition_alloc/partition_alloc_check.h"
 
@@ -86,14 +87,6 @@ class ScopedLockAcquisitionTimer {
 }  // namespace
 
 // static
-std::atomic<int> SpinningMutex::s_spin_count{SpinningMutex::kSpinCount};
-
-// static
-void SpinningMutex::SetSpinCount(int spin_count) {
-  s_spin_count.store(spin_count, std::memory_order_relaxed);
-}
-
-// static
 void SpinningMutex::SetLockMetricsRecorder(
     LockMetricsRecorderInterface* recorder) {
   auto* old_recorder =
@@ -119,7 +112,6 @@ void SpinningMutex::Reinit() {
 void SpinningMutex::AcquireSpinThenBlock() {
   int tries = 0;
   int backoff = 1;
-  const int spin_count = s_spin_count.load(std::memory_order_relaxed);
 
   do {
     if (Try()) [[likely]] {
@@ -145,7 +137,7 @@ void SpinningMutex::AcquireSpinThenBlock() {
     }
     constexpr int kMaxBackoff = 16;
     backoff = std::min(kMaxBackoff, backoff << 1);
-  } while (tries < spin_count);
+  } while (tries < kSpinCount);
 
   ScopedLockAcquisitionTimer timer;
   LockSlow();
@@ -326,10 +318,8 @@ os_unfair_lock_lock_with_options(os_unfair_lock* lock,
 
 void SpinningMutex::LockSlow() {
 #if PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE)
-  // The private options entry point is present on iOS 12, but that version of
-  // libplatform rejects the newer synchronization/adaptive-spin option bits
-  // with a fatal "Invalid options" trap. Use the public lock operation on the
-  // legacy build instead.
+  // libplatform на iOS 12 падає з "Invalid options" на нових бітах
+  // тому в legacy збірці звичайний os_unfair_lock_lock
   os_unfair_lock_lock(&unfair_lock_);
 #else
   if (os_unfair_lock_lock_with_options) {

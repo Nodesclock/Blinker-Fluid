@@ -159,13 +159,66 @@ base::DictValue NetLogOsConfigChangedParams(
 
 #endif  // BUILDFLAG(IS_MAC)
 
+// Get the connection type from `path`. If `path` references more than one
+// interfaces, return CONNECTION_UNKNOWN unless all the interfaces are of
+// the same type (to mirror the logic in ConnectionTypeFromInterfaceList).
+//
+// While it is possible to list the available interfaces on iOS, using the
+// getifaddrs() POSIX API, there is no API to get the connection type from
+// them. The nw_path_t instance however allow iterating over the available
+// nw_interface_t and retrieve from them the connection type. This appears
+// the be the only available API exposing this information (i.e. it is not
+// possible to list all nw_interface_t without having an nw_path_t first).
+NetworkChangeNotifier::ConnectionType ConnectionTypeFromPath(nw_path_t path) {
+  __block bool is_first = true;
+  __block nw_interface_type_t type = nw_interface_type_other;
+  nw_path_enumerate_interfaces(path, ^bool(nw_interface_t interface) {
+    nw_interface_type_t inner_type = nw_interface_get_type(interface);
+    if (is_first) {
+      is_first = false;
+      type = inner_type;
+    } else if (type != inner_type) {
+      // There is more than one interface, and they do not have not have
+      // the same type. Stop the iteration and set up the type so that
+      // the function will return CONNECTION_UNKNOWN to replicate the logic
+      // from ConnectionTypeFromInterfaceList.
+      type = nw_interface_type_other;
+      return false;
+    }
+
+    return true;
+  });
+
+  switch (type) {
+    case nw_interface_type_wifi:
+      return NetworkChangeNotifier::ConnectionType::CONNECTION_WIFI;
+
+    case nw_interface_type_wired:
+      return NetworkChangeNotifier::ConnectionType::CONNECTION_ETHERNET;
+
+    case nw_interface_type_cellular:
+      return NetworkChangeNotifier::ConnectionType::CONNECTION_5G;
+
+    case nw_interface_type_loopback:
+      return NetworkChangeNotifier::ConnectionType::CONNECTION_NONE;
+
+    case nw_interface_type_other:
+      return NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN;
+  }
+
+  DLOG(WARNING) << "unknown connection type: " << type;
+  return NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN;
+}
+
 }  // namespace
 
+#if defined(COMPILE_OLD_NOTIFIER_IMPL)
 static bool CalculateReachability(SCNetworkConnectionFlags flags) {
   bool reachable = flags & kSCNetworkFlagsReachable;
   bool connection_required = flags & kSCNetworkFlagsConnectionRequired;
   return reachable && !connection_required;
 }
+#endif  // defined(COMPILE_OLD_NOTIFIER_IMPL)
 
 NetworkChangeNotifierApple::NetworkChangeNotifierApple()
     : NetworkChangeNotifier(NetworkChangeCalculatorParamsMac()),
@@ -187,11 +240,13 @@ NetworkChangeNotifierApple::NetworkChangeNotifierApple()
 }
 
 NetworkChangeNotifierApple::~NetworkChangeNotifierApple() {
-  StopNetworkPathMonitor();
   ClearGlobalPointer();
   // Delete the ConfigWatcher to join the notifier thread, ensuring that
-  // StartReachabilityNotifications() has an opportunity to run to completion.
+  // SetInitialConnectionType() and StartReachabilityNotifications() have an
+  // opportunity to run to completion before tearing down the path monitor or
+  // reachability state.
   config_watcher_.reset();
+  StopNetworkPathMonitor();
 
 #if defined(COMPILE_OLD_NOTIFIER_IMPL)
   // Now that StartReachabilityNotifications() has either run to completion or
@@ -250,6 +305,7 @@ void NetworkChangeNotifierApple::Forwarder::Init() {
   net_config_watcher_->SetInitialConnectionType();
 }
 
+#if defined(COMPILE_OLD_NOTIFIER_IMPL)
 // static
 NetworkChangeNotifier::ConnectionType
 NetworkChangeNotifierApple::CalculateConnectionType(
@@ -258,79 +314,82 @@ NetworkChangeNotifierApple::CalculateConnectionType(
   if (!reachable)
     return CONNECTION_NONE;
 
-#if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
+#if !BUILDFLAG(IS_IOS)
+  return ConnectionTypeFromInterfaces();
+#elif BUILDFLAG(IS_IOS_TVOS)
+  // On TVOS, it is not possible to determine the type of connection as neither
+  // ConnectionTypeFromInterfaces() nor CTTelephonyNetworkInfo are available.
+  return CONNECTION_UNKNOWN;
+#else
+  // On iOS, ConnectionTypeFromInterfaces() is not available, so try to detect
+  // the connection type using CTTelephonyNetworkInfo.
   if (!(flags & kSCNetworkReachabilityFlagsIsWWAN)) {
     return CONNECTION_WIFI;
   }
+  NSDictionary<NSString*, NSString*>* service_current_radio_access_technology =
+      nil;
   if (@available(iOS 12, *)) {
     CTTelephonyNetworkInfo* info = [[CTTelephonyNetworkInfo alloc] init];
-    NSDictionary<NSString*, NSString*>*
-        service_current_radio_access_technology =
-            info.serviceCurrentRadioAccessTechnology;
-    NSSet<NSString*>* technologies_2g = [NSSet
-        setWithObjects:CTRadioAccessTechnologyGPRS, CTRadioAccessTechnologyEdge,
-                       CTRadioAccessTechnologyCDMA1x, nil];
-    NSSet<NSString*>* technologies_3g =
-        [NSSet setWithObjects:CTRadioAccessTechnologyWCDMA,
-                              CTRadioAccessTechnologyHSDPA,
-                              CTRadioAccessTechnologyHSUPA,
-                              CTRadioAccessTechnologyCDMAEVDORev0,
-                              CTRadioAccessTechnologyCDMAEVDORevA,
-                              CTRadioAccessTechnologyCDMAEVDORevB,
-                              CTRadioAccessTechnologyeHRPD, nil];
-    NSSet<NSString*>* technologies_4g =
-        [NSSet setWithObjects:CTRadioAccessTechnologyLTE, nil];
-    // TODO: Use constants from CoreTelephony once Cronet builds with Xcode 12.1
-    NSSet<NSString*>* technologies_5g =
-        [NSSet setWithObjects:@"CTRadioAccessTechnologyNRNSA",
-                              @"CTRadioAccessTechnologyNR", nil];
-    int best_network = 0;
-    for (NSString* service in service_current_radio_access_technology) {
-      if (!service_current_radio_access_technology[service]) {
-        continue;
-      }
-      int current_network = 0;
-
-      NSString* network_type = service_current_radio_access_technology[service];
-
-      if ([technologies_2g containsObject:network_type]) {
-        current_network = 2;
-      } else if ([technologies_3g containsObject:network_type]) {
-        current_network = 3;
-      } else if ([technologies_4g containsObject:network_type]) {
-        current_network = 4;
-      } else if ([technologies_5g containsObject:network_type]) {
-        current_network = 5;
-      } else {
-        // New technology?
-        NOTREACHED() << "Unknown network technology: " << network_type;
-      }
-      if (current_network > best_network) {
-        // iOS is supposed to use the best network available.
-        best_network = current_network;
-      }
-    }
-    switch (best_network) {
-      case 2:
-        return CONNECTION_2G;
-      case 3:
-        return CONNECTION_3G;
-      case 4:
-        return CONNECTION_4G;
-      case 5:
-        return CONNECTION_5G;
-      default:
-        // Default to CONNECTION_3G to not change existing behavior.
-        return CONNECTION_3G;
-    }
-  } else {
-    return CONNECTION_3G;
+    service_current_radio_access_technology =
+        info.serviceCurrentRadioAccessTechnology;
   }
+  NSSet<NSString*>* technologies_2g = [NSSet
+      setWithObjects:CTRadioAccessTechnologyGPRS, CTRadioAccessTechnologyEdge,
+                     CTRadioAccessTechnologyCDMA1x, nil];
+  NSSet<NSString*>* technologies_3g = [NSSet
+      setWithObjects:CTRadioAccessTechnologyWCDMA, CTRadioAccessTechnologyHSDPA,
+                     CTRadioAccessTechnologyHSUPA,
+                     CTRadioAccessTechnologyCDMAEVDORev0,
+                     CTRadioAccessTechnologyCDMAEVDORevA,
+                     CTRadioAccessTechnologyCDMAEVDORevB,
+                     CTRadioAccessTechnologyeHRPD, nil];
+  NSSet<NSString*>* technologies_4g =
+      [NSSet setWithObjects:CTRadioAccessTechnologyLTE, nil];
+  NSSet<NSString*>* technologies_5g =
+      [NSSet setWithObjects:CTRadioAccessTechnologyNRNSA,
+                            CTRadioAccessTechnologyNR, nil];
+  int best_network = 0;
+  for (NSString* service in service_current_radio_access_technology) {
+    if (!service_current_radio_access_technology[service]) {
+      continue;
+    }
+    int current_network = 0;
 
-#else
-  return ConnectionTypeFromInterfaces();
+    NSString* network_type = service_current_radio_access_technology[service];
+
+    if ([technologies_2g containsObject:network_type]) {
+      current_network = 2;
+    } else if ([technologies_3g containsObject:network_type]) {
+      current_network = 3;
+    } else if ([technologies_4g containsObject:network_type]) {
+      current_network = 4;
+    } else if ([technologies_5g containsObject:network_type]) {
+      current_network = 5;
+    } else {
+      // New technology?
+      NOTREACHED() << "Unknown network technology: " << network_type;
+    }
+    if (current_network > best_network) {
+      // iOS is supposed to use the best network available.
+      best_network = current_network;
+    }
+  }
+  switch (best_network) {
+    case 2:
+      return CONNECTION_2G;
+    case 3:
+      return CONNECTION_3G;
+    case 4:
+      return CONNECTION_4G;
+    case 5:
+      return CONNECTION_5G;
+    default:
+      // Default to CONNECTION_3G to not change existing behavior.
+      return CONNECTION_3G;
+  }
 #endif
 }
+#endif  // defined(COMPILE_OLD_NOTIFIER_IMPL)
 
 void NetworkChangeNotifierApple::Forwarder::StartReachabilityNotifications() {
   net_config_watcher_->StartReachabilityNotifications();
@@ -538,6 +597,7 @@ void NetworkChangeNotifierApple::CleanUpOnNotifierThread() {
 #endif  // BUILDFLAG(IS_MAC)
 }
 
+#if defined(COMPILE_OLD_NOTIFIER_IMPL)
 // static
 void NetworkChangeNotifierApple::ReachabilityCallback(
     SCNetworkReachabilityRef target,
@@ -569,12 +629,10 @@ void NetworkChangeNotifierApple::ReachabilityCallback(
   NotifyObserversOfIPAddressChange();
 #endif  // BUILDFLAG(IS_IOS)
 }
+#endif  // defined(COMPILE_OLD_NOTIFIER_IMPL)
 
 bool NetworkChangeNotifierApple::ShouldUseNetworkPathMonitor() const {
 #if BUILDFLAG(IS_IOS)
-  // Network.framework's path monitor was introduced in iOS 12. Keep using
-  // SCNetworkReachability on iOS 11 instead of weak-linking and accidentally
-  // calling an unavailable entry point.
   if (!@available(iOS 12.0, *)) {
     return false;
   }
@@ -623,8 +681,8 @@ bool NetworkChangeNotifierApple::EnsureNetworkPathMonitorStarted() {
     switch (nw_path_get_status(path)) {
       case nw_path_status_satisfied:
         // A fully satisfied path means we can derive the connection type from
-        // the active interfaces.
-        new_type = ConnectionTypeFromInterfaces();
+        // the active path.
+        new_type = ConnectionTypeFromPath(path);
         break;
       case nw_path_status_satisfiable:
         // The path could become satisfied if the system performs extra work
