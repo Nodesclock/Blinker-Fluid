@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "src/common/code-memory-access.h"
+#include "src/common/ios-code-memory-access.h"
 
 #include <optional>
 
@@ -23,6 +24,10 @@
 #include "src/base/platform/mutex.h"
 #endif
 
+#if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT && defined(V8_OS_IOS)
+extern "C" const char* BlinkBootLogPath();
+#endif
+
 #include "src/common/code-memory-access-inl.h"
 #include "src/objects/instruction-stream-inl.h"
 #include "src/utils/allocation.h"
@@ -36,9 +41,16 @@ namespace internal {
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
 
 namespace {
-Address g_ios_code_range_base = kNullAddress;
-size_t g_ios_code_range_size = 0;
-// Serializes fallback permission changes.
+const char* WxLogPath() {
+#if defined(V8_OS_IOS)
+  return BlinkBootLogPath();
+#else
+  return "/var/mobile/Documents/blink_boot.log";
+#endif
+}
+
+std::atomic<Address> g_ios_code_range_base{kNullAddress};
+std::atomic<size_t> g_ios_code_range_size{0};
 base::Mutex* ios_wx_mutex() {
   static base::LazyMutex mutex = LAZY_MUTEX_INITIALIZER;
   return mutex.Pointer();
@@ -48,26 +60,26 @@ bool g_ios_whole_range_writable = false;
 uint64_t g_ios_wx_transitions = 0;
 uint64_t g_ios_wx_failures = 0;
 
-// A zero offset selects the mprotect fallback.
+// нульовий offset значить запасний шлях через mprotect
 std::atomic<intptr_t> g_ios_mirror_offset{0};
 Address g_ios_mirror_base = kNullAddress;
 size_t g_ios_mirror_size = 0;
 
-// Wasm code lives outside the heap's code range, in spaces the WasmCodeManager
-// reserves on demand, so one base/offset pair cannot describe every mirrored
-// region. These slots carry the wasm spaces; the heap's code range keeps its
-// own variables above so the mprotect fallback and the CRASH_WX_* counters
-// continue to describe exactly what they did before.
-constexpr int kMaxWasmMirrors = 8;
-struct WasmMirror {
+// Інші купи (без pointer compression) і Wasm мають свої range,
+// їх дзеркала живе поки живий range
+constexpr int kMaxAdditionalMirrors = 128;
+struct AdditionalMirror {
   std::atomic<Address> base{kNullAddress};
   std::atomic<size_t> size{0};
   std::atomic<intptr_t> offset{0};
   Address mirror_base = kNullAddress;
 };
-WasmMirror g_wasm_mirrors[kMaxWasmMirrors];
+AdditionalMirror g_additional_mirrors[kMaxAdditionalMirrors];
+std::atomic<int> g_additional_mirror_limit{0};
 
-// Fallback spans are restored when the outermost scope closes.
+bool RegisterAdditionalCodeRangeLocked(Address base, size_t size);
+void UnregisterAdditionalCodeRangeLocked(Address base);
+
 std::vector<std::pair<Address, size_t>>& WritableSpans() {
   static std::vector<std::pair<Address, size_t>> spans;
   return spans;
@@ -79,7 +91,7 @@ size_t IOSPageSize() {
   return page_size;
 }
 
-// Avoid allocator locks while changing permissions under V8 write paths.
+// Без локів аллокатора, бо права міняються посеред запису V8
 void Protect(Address addr, size_t size, bool writable) {
   if (addr == kNullAddress || size == 0) {
     return;
@@ -90,9 +102,8 @@ void Protect(Address addr, size_t size, bool writable) {
   const int prot = writable ? (PROT_READ | PROT_WRITE) : (PROT_READ | PROT_EXEC);
   if (mprotect(reinterpret_cast<void*>(start), end - start, prot) != 0) {
     ++g_ios_wx_failures;
-    // Record a bounded number of failures for crash diagnosis.
     if (g_ios_wx_failures <= 8) {
-      int fd = open("/var/mobile/Documents/blink_boot.log",
+      int fd = open(WxLogPath(),
                     O_WRONLY | O_APPEND | O_CREAT, 0644);
       if (fd >= 0) {
         char buf[160];
@@ -112,8 +123,8 @@ void Protect(Address addr, size_t size, bool writable) {
   ++g_ios_wx_transitions;
 }
 
-// Clamps a span to the registered code range. Writes to off-heap buffers go
-// through the same scopes and must not be mprotected.
+// Обрізає спан до code range
+// буфери поза купою пишуться в той самий scope, mprotect їм не можна
 bool ClampToCodeRange(Address* addr, size_t* size) {
   if (g_ios_code_range_base == kNullAddress || g_ios_code_range_size == 0) {
     return false;
@@ -122,7 +133,8 @@ bool ClampToCodeRange(Address* addr, size_t* size) {
   if (*addr + *size <= g_ios_code_range_base || *addr >= range_end) {
     return false;
   }
-  const Address start = std::max(*addr, g_ios_code_range_base);
+  const Address start =
+      std::max(*addr, g_ios_code_range_base.load(std::memory_order_relaxed));
   const Address end = std::min(*addr + *size, range_end);
   *addr = start;
   *size = end - start;
@@ -143,7 +155,7 @@ void RestoreAllLocked() {
 
 namespace {
 void LogWx(const char* msg) {
-  int fd = open("/var/mobile/Documents/blink_boot.log",
+  int fd = open(WxLogPath(),
                 O_WRONLY | O_APPEND | O_CREAT, 0644);
   if (fd >= 0) {
     ssize_t w = write(fd, msg, strlen(msg));
@@ -156,13 +168,20 @@ void LogWx(const char* msg) {
 // static
 void IOSCodeRangeWriteProtect::RegisterCodeRange(Address base, size_t size) {
   base::MutexGuard guard(ios_wx_mutex());
+#if defined(V8_OS_IOS)
+  if (g_ios_code_range_base != kNullAddress) {
+    // Чуже живе відображення не міняєм
+    // якщо свого дзеркала нема, в RX не пишемо
+    CHECK(RegisterAdditionalCodeRangeLocked(base, size));
+    return;
+  }
+#endif
   g_ios_code_range_base = base;
   g_ios_code_range_size = size;
   g_ios_wx_depth = 0;
   g_ios_whole_range_writable = false;
   WritableSpans().clear();
 
-  // Release a previous registration.
   if (g_ios_mirror_base != kNullAddress && g_ios_mirror_size != 0) {
     vm_deallocate(mach_task_self(),
                   static_cast<vm_address_t>(g_ios_mirror_base),
@@ -175,8 +194,8 @@ void IOSCodeRangeWriteProtect::RegisterCodeRange(Address base, size_t size) {
     return;
   }
 #if !defined(V8_OS_IOS)
-  // mksnapshot is a macOS host tool and cannot use the device mirror.
-  LogWx("WX_DUALMAP: host build (mksnapshot) — mirror disabled, using flip\n");
+  // mksnapshot host тулза під macOS, дзеркало пристрою їй не годиться
+  LogWx("WX_DUALMAP: host build (mksnapshot), mirror disabled, using flip\n");
   return;
 #else
   vm_address_t mirror = 0;
@@ -194,7 +213,7 @@ void IOSCodeRangeWriteProtect::RegisterCodeRange(Address base, size_t size) {
     g_ios_mirror_offset.store(static_cast<intptr_t>(g_ios_mirror_base) -
                                   static_cast<intptr_t>(base),
                               std::memory_order_release);
-    // RecommitPages does not restore execute permission on Darwin.
+    // На Darwin RecommitPages execute не вертає
     if (mprotect(reinterpret_cast<void*>(base), size,
                  PROT_READ | PROT_EXEC) != 0) {
       char eb[128];
@@ -213,32 +232,33 @@ void IOSCodeRangeWriteProtect::RegisterCodeRange(Address base, size_t size) {
   } else {
     char buf[128];
     snprintf(buf, sizeof(buf),
-             "WX_DUALMAP: mirror FAILED kr=%d — falling back to mprotect flip\n",
+             "WX_DUALMAP: mirror FAILED kr=%d, falling back to mprotect flip\n",
              kr);
     LogWx(buf);
+    if (kr == KERN_SUCCESS) {
+      vm_deallocate(mach_task_self(), mirror, size);
+    }
   }
 #endif  // !defined(V8_OS_IOS)
 }
 
-// static
-bool IOSCodeRangeWriteProtect::RegisterWasmCodeRange(Address base,
-                                                     size_t size) {
+namespace {
+bool RegisterAdditionalCodeRangeLocked(Address base, size_t size) {
 #if !defined(V8_OS_IOS)
   return false;
 #else
   if (base == kNullAddress || size == 0) {
     return false;
   }
-  base::MutexGuard guard(ios_wx_mutex());
-  WasmMirror* slot = nullptr;
-  for (WasmMirror& candidate : g_wasm_mirrors) {
+  AdditionalMirror* slot = nullptr;
+  for (AdditionalMirror& candidate : g_additional_mirrors) {
     if (candidate.offset.load(std::memory_order_relaxed) == 0) {
       slot = &candidate;
       break;
     }
   }
   if (!slot) {
-    LogWx("WX_DUALMAP: no free wasm mirror slot\n");
+    LogWx("WX_DUALMAP: no free additional code mirror slot\n");
     return false;
   }
 
@@ -253,7 +273,7 @@ bool IOSCodeRangeWriteProtect::RegisterWasmCodeRange(Address base,
       mprotect(reinterpret_cast<void*>(mirror), size,
                PROT_READ | PROT_WRITE) != 0) {
     char buf[128];
-    snprintf(buf, sizeof(buf), "WX_DUALMAP: wasm mirror FAILED kr=%d\n", kr);
+    snprintf(buf, sizeof(buf), "WX_DUALMAP: additional mirror FAILED kr=%d\n", kr);
     LogWx(buf);
     if (kr == KERN_SUCCESS) {
       vm_deallocate(mach_task_self(), mirror, size);
@@ -261,14 +281,13 @@ bool IOSCodeRangeWriteProtect::RegisterWasmCodeRange(Address base,
     return false;
   }
 
-  // The source view has to be executable before any wasm code runs from it;
-  // iOS clamps a RWX request to RW, which is what left tier 5 faulting on
-  // instruction fetch.
+  // Джерело має стати виконуваним до запуску wasm коду
+  // iOS обрізає RWX до RW, тому tier 5 падав на fetch
   if (mprotect(reinterpret_cast<void*>(base), size, PROT_READ | PROT_EXEC) !=
       0) {
     char buf[128];
     snprintf(buf, sizeof(buf),
-             "WX_DUALMAP: wasm range RX mprotect FAILED errno=%d\n", errno);
+             "WX_DUALMAP: additional range RX mprotect FAILED errno=%d\n", errno);
     LogWx(buf);
     vm_deallocate(mach_task_self(), mirror, size);
     return false;
@@ -280,20 +299,22 @@ bool IOSCodeRangeWriteProtect::RegisterWasmCodeRange(Address base,
   slot->offset.store(
       static_cast<intptr_t>(mirror) - static_cast<intptr_t>(base),
       std::memory_order_release);
+  const int limit = static_cast<int>(slot - g_additional_mirrors) + 1;
+  if (limit > g_additional_mirror_limit.load(std::memory_order_relaxed)) {
+    g_additional_mirror_limit.store(limit, std::memory_order_release);
+  }
 
   char buf[192];
   snprintf(buf, sizeof(buf),
-           "WX_DUALMAP: wasm mirror active base=%llx size=%zuKB (source RX)\n",
+           "WX_DUALMAP: additional mirror active base=%llx size=%zuKB (source RX)\n",
            static_cast<unsigned long long>(base), size / 1024);
   LogWx(buf);
   return true;
 #endif  // !defined(V8_OS_IOS)
 }
 
-// static
-void IOSCodeRangeWriteProtect::UnregisterWasmCodeRange(Address base) {
-  base::MutexGuard guard(ios_wx_mutex());
-  for (WasmMirror& slot : g_wasm_mirrors) {
+void UnregisterAdditionalCodeRangeLocked(Address base) {
+  for (AdditionalMirror& slot : g_additional_mirrors) {
     if (slot.offset.load(std::memory_order_relaxed) == 0 ||
         slot.base.load(std::memory_order_relaxed) != base) {
       continue;
@@ -310,6 +331,38 @@ void IOSCodeRangeWriteProtect::UnregisterWasmCodeRange(Address base) {
     return;
   }
 }
+}  // namespace
+
+// static
+bool IOSCodeRangeWriteProtect::RegisterWasmCodeRange(Address base, size_t size) {
+  base::MutexGuard guard(ios_wx_mutex());
+  return RegisterAdditionalCodeRangeLocked(base, size);
+}
+
+// static
+void IOSCodeRangeWriteProtect::UnregisterWasmCodeRange(Address base) {
+  base::MutexGuard guard(ios_wx_mutex());
+  UnregisterAdditionalCodeRangeLocked(base);
+}
+
+void UnregisterIOSCodeRange(Address base) {
+  base::MutexGuard guard(ios_wx_mutex());
+  if (g_ios_code_range_base != base) {
+    UnregisterAdditionalCodeRangeLocked(base);
+    return;
+  }
+  g_ios_mirror_offset.store(0, std::memory_order_release);
+  if (g_ios_mirror_base != kNullAddress && g_ios_mirror_size != 0) {
+    vm_deallocate(mach_task_self(), g_ios_mirror_base, g_ios_mirror_size);
+  }
+  g_ios_mirror_base = kNullAddress;
+  g_ios_mirror_size = 0;
+  g_ios_code_range_base = kNullAddress;
+  g_ios_code_range_size = 0;
+  g_ios_wx_depth = 0;
+  g_ios_whole_range_writable = false;
+  WritableSpans().clear();
+}
 
 // static
 bool IOSCodeRangeWriteProtect::HasMirror() {
@@ -323,24 +376,24 @@ Address IOSCodeRangeWriteProtect::MirrorWriteAddress(Address addr) {
       addr < g_ios_code_range_base + g_ios_code_range_size) {
     return static_cast<Address>(static_cast<intptr_t>(addr) + off);
   }
-  for (WasmMirror& slot : g_wasm_mirrors) {
-    intptr_t wasm_off = slot.offset.load(std::memory_order_acquire);
-    if (wasm_off == 0) {
+  const int limit = g_additional_mirror_limit.load(std::memory_order_acquire);
+  for (int i = 0; i < limit; ++i) {
+    AdditionalMirror& slot = g_additional_mirrors[i];
+    intptr_t offset = slot.offset.load(std::memory_order_acquire);
+    if (offset == 0) {
       continue;
     }
-    Address wasm_base = slot.base.load(std::memory_order_relaxed);
-    if (addr >= wasm_base &&
-        addr < wasm_base + slot.size.load(std::memory_order_relaxed)) {
-      return static_cast<Address>(static_cast<intptr_t>(addr) + wasm_off);
+    Address base = slot.base.load(std::memory_order_relaxed);
+    if (addr >= base &&
+        addr < base + slot.size.load(std::memory_order_relaxed)) {
+      return static_cast<Address>(static_cast<intptr_t>(addr) + offset);
     }
   }
-  // Non-code memory is written in place.
   return addr;
 }
 
 // static
 void IOSCodeRangeWriteProtect::SetWritable() {
-  // The mirror keeps the executable view RX.
   if (g_ios_mirror_offset.load(std::memory_order_acquire) != 0) {
     return;
   }
@@ -360,10 +413,10 @@ void IOSCodeRangeWriteProtect::SetWritableRange(Address addr, size_t size) {
   base::MutexGuard guard(ios_wx_mutex());
   ++g_ios_wx_depth;
   if (g_ios_whole_range_writable) {
-    return;  // Already writable via a coarser scope.
+    return;  // вже writable через ширший scope
   }
   if (!ClampToCodeRange(&addr, &size)) {
-    return;  // Not code-range memory; nothing to unprotect.
+    return;
   }
   Protect(addr, size, /*writable=*/true);
   WritableSpans().emplace_back(addr, size);
@@ -388,7 +441,6 @@ uint64_t IOSCodeRangeWriteProtect::transitions() {
 // static
 uint64_t IOSCodeRangeWriteProtect::failures() { return g_ios_wx_failures; }
 
-// Exposes W^X state to the crash logger.
 extern "C" void BlinkIOSWxState(int* depth, int* whole_writable,
                                 unsigned long long* transitions,
                                 unsigned long long* failures) {
@@ -398,7 +450,7 @@ extern "C" void BlinkIOSWxState(int* depth, int* whole_writable,
   if (failures) *failures = g_ios_wx_failures;
 }
 
-#endif  // V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
+#endif
 
 ThreadIsolation::TrustedData ThreadIsolation::trusted_data_;
 
@@ -578,6 +630,42 @@ ThreadIsolation::TryLookupJitPage(Address addr, size_t size) {
 
 // static
 std::optional<ThreadIsolation::JitPageReference>
+ThreadIsolation::TryLookupJitPageWithoutBlocking(Address addr) {
+  // Try to lock the pages mutex and the mutex of the page itself to prevent
+  // potential deadlocks. The profiler can try to do a lookup from a signal
+  // handler. If that signal handler runs while the thread locked one of these
+  // mutexes, it would result in a deadlock.
+  std::optional<base::MutexGuard> guard =
+      base::MutexGuard::TryLock(trusted_data_.jit_pages_mutex_);
+  if (!guard) {
+    return {};
+  }
+
+  // upper_bound gives us an iterator to the position after address.
+  auto it = trusted_data_.jit_pages_->upper_bound(addr);
+
+  // The previous page should be the one we're looking for.
+  if (it == trusted_data_.jit_pages_->begin()) {
+    return {};
+  }
+  it--;
+
+  std::optional<JitPageReference> jit_page =
+      JitPageReference::TryLock(it->second, it->first);
+  if (!jit_page) {
+    return {};
+  }
+
+  // If the address is not in the range of the jit page, return.
+  if (jit_page->End() <= addr) {
+    return {};
+  }
+
+  return jit_page;
+}
+
+// static
+std::optional<ThreadIsolation::JitPageReference>
 ThreadIsolation::TryLookupJitPageLocked(Address addr, size_t size) {
   trusted_data_.jit_pages_mutex_->AssertHeld();
 
@@ -682,6 +770,25 @@ bool AllocationIsBehindRange(Address range_start, Address range_size,
 ThreadIsolation::JitPageReference::JitPageReference(class JitPage* jit_page,
                                                     base::Address address)
     : page_lock_(&jit_page->mutex_), jit_page_(jit_page), address_(address) {}
+
+ThreadIsolation::JitPageReference::JitPageReference(
+    base::MutexGuard&& page_lock, class JitPage* jit_page,
+    base::Address address)
+    : page_lock_(std::move(page_lock)),
+      jit_page_(jit_page),
+      address_(address) {}
+
+// static
+std::optional<ThreadIsolation::JitPageReference>
+ThreadIsolation::JitPageReference::TryLock(class JitPage* jit_page,
+                                           base::Address address) {
+  std::optional<base::MutexGuard> page_lock =
+      base::MutexGuard::TryLock(&jit_page->mutex_);
+  if (!page_lock) {
+    return {};
+  }
+  return JitPageReference(std::move(*page_lock), jit_page, address);
+}
 
 ThreadIsolation::JitPage::~JitPage() {
   // TODO(sroettger): check that the page is not in use (scan shadow stacks).
@@ -799,9 +906,19 @@ void ThreadIsolation::JitPageReference::UnregisterAllocationsExcept(
   jit_page_->allocations_.swap(keep_allocations);
 }
 
-base::Address ThreadIsolation::JitPageReference::StartOfAllocationAt(
+std::optional<base::Address>
+ThreadIsolation::JitPageReference::StartOfAllocationAt(
     base::Address inner_pointer) {
-  return AllocationContaining(inner_pointer).first;
+  auto it = jit_page_->allocations_.upper_bound(inner_pointer);
+  if (it == jit_page_->allocations_.begin()) {
+    return {};
+  }
+  it--;
+  size_t offset = inner_pointer - it->first;
+  if (it->second.Size() <= offset) {
+    return {};
+  }
+  return it->first;
 }
 
 std::pair<base::Address, ThreadIsolation::JitAllocation&>
@@ -813,6 +930,14 @@ ThreadIsolation::JitPageReference::AllocationContaining(
   size_t offset = inner_pointer - it->first;
   CHECK_GT(it->second.Size(), offset);
   return {it->first, it->second};
+}
+
+base::Address ThreadIsolation::JitPageReference::EndOfLastAllocation() {
+  if (jit_page_->allocations_.empty()) {
+    return address_;
+  }
+  auto last = jit_page_->allocations_.rbegin();
+  return last->first + last->second.Size();
 }
 
 // static
@@ -970,6 +1095,8 @@ ThreadIsolation::JitPageReference ThreadIsolation::SplitJitPageLocked(
     JitPage* mid;
     ConstructNew(&mid, size);
     jit_page.Shrink(mid);
+    // Defense in depth: the cut should not be in the middle of a code object.
+    CHECK(jit_page.EndOfLastAllocation() <= jit_page.End());
     trusted_data_.jit_pages_->emplace(addr, mid);
     return JitPageReference(mid, addr);
   }
@@ -1018,53 +1145,16 @@ bool ThreadIsolation::WriteProtectMemory(
 #endif
 }
 
-namespace {
-
-class MutexUnlocker {
- public:
-  explicit MutexUnlocker(base::Mutex& mutex) : mutex_(mutex) {
-    mutex_.AssertHeld();
-  }
-
-  ~MutexUnlocker() {
-    mutex_.AssertHeld();
-    mutex_.Unlock();
-  }
-
- private:
-  base::Mutex& mutex_;
-};
-
-}  // namespace
-
 // static
-bool ThreadIsolation::CanLookupStartOfJitAllocationAt(Address inner_pointer) {
-  CFIMetadataWriteScope write_scope("CanLookupStartOfJitAllocationAt");
-
-  // Try to lock the pages mutex and the mutex of the page itself to prevent
-  // potential dead locks. The profiler can try to do a lookup from a signal
-  // handler. If that signal handler runs while the thread locked one of these
-  // mutexes, it would result in a dead lock.
-  if (!trusted_data_.jit_pages_mutex_->TryLock()) {
-    return false;
-  }
-  MutexUnlocker pages_mutex_unlocker(*trusted_data_.jit_pages_mutex_);
-
-  // upper_bound gives us an iterator to the position after address.
-  auto it = trusted_data_.jit_pages_->upper_bound(inner_pointer);
-
-  // The previous page should be the one we're looking for.
-  if (it == trusted_data_.jit_pages_->begin()) {
+std::optional<Address> ThreadIsolation::TryLookupStartOfJitAllocationAt(
+    Address inner_pointer) {
+  CFIMetadataWriteScope write_scope("TryLookupStartOfJitAllocationAt");
+  std::optional<JitPageReference> page =
+      TryLookupJitPageWithoutBlocking(inner_pointer);
+  if (!page) {
     return {};
   }
-  it--;
-
-  JitPage* jit_page = it->second;
-  if (jit_page->mutex_.TryLock()) {
-    jit_page->mutex_.Unlock();
-    return true;
-  }
-  return false;
+  return page->StartOfAllocationAt(inner_pointer);
 }
 
 // static

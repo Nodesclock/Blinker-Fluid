@@ -49,9 +49,8 @@ GetPagePermissions(v8::PageAllocator::Permission permission) {
           ::partition_alloc::PageAccessibilityConfiguration::kReadExecute);
     case v8::PageAllocator::Permission::kNoAccessWillJitLater:
 #if BUILDFLAG(IS_IOS)
-      // iOS rejects Chromium's MAP_JIT-backed reservation mode on this
-      // TrollStore environment. Reserve ordinary inaccessible address space;
-      // V8 will explicitly change permissions when committing code pages.
+      // Резерв з MAP_JIT iOS тут відхиляє, резервуєм звичайну недоступну память
+      // V8 сам змінить права коли коммітить код
       return ::partition_alloc::PageAccessibilityConfiguration::kInaccessible;
 #else
       return ::partition_alloc::PageAccessibilityConfiguration::

@@ -92,7 +92,6 @@ class V8_NODISCARD RwxMemoryWriteScope {
   // The comment argument is used only for ensuring that explanation about why
   // the scope is needed is given at particular use case.
   V8_INLINE explicit RwxMemoryWriteScope(const char* comment);
-  // Address-aware form used by the iOS write mirror.
   V8_INLINE RwxMemoryWriteScope(const char* comment, Address addr, size_t size);
   V8_INLINE ~RwxMemoryWriteScope();
 
@@ -127,22 +126,17 @@ class WritableJitPage;
 class WritableJitAllocation;
 
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
-// Provides an RX code range with a shared RW write mirror on iOS.
 class V8_EXPORT_PRIVATE IOSCodeRangeWriteProtect final {
  public:
   static void RegisterCodeRange(Address base, size_t size);
 
-  // Wasm allocates its code outside the heap's code range, so it needs its own
-  // mirror. Returns false when one could not be established, in which case the
-  // caller must leave the region non-executable rather than run code from
-  // pages it cannot write to.
+  // Wasm код лежить поза code range, тому йому окреме дзеркало
+  // false значить, що регіон лишаєм без execute
   static bool RegisterWasmCodeRange(Address base, size_t size);
   static void UnregisterWasmCodeRange(Address base);
 
-  // Fallback for systems where the mirror could not be created.
   static void SetWritable();
 
-  // Makes [addr, addr + size) writable in the fallback implementation.
   static void SetWritableRange(Address addr, size_t size);
 
   static void SetExecutable();
@@ -151,10 +145,9 @@ class V8_EXPORT_PRIVATE IOSCodeRangeWriteProtect final {
   static uint64_t failures();
 
   static bool HasMirror();
-  // Returns the RW alias for a code address, or addr when no alias applies.
   static Address MirrorWriteAddress(Address addr);
 };
-#endif  // V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
+#endif
 class WritableJumpTablePair;
 
 // The ThreadIsolation API is used to protect executable memory using per-thread
@@ -226,9 +219,10 @@ class V8_EXPORT ThreadIsolation {
 
   static void UnregisterWasmAllocation(Address addr, size_t size);
 
-  // Check for a potential dead lock in case we want to lookup the jit
-  // allocation from inside a signal handler.
-  static bool CanLookupStartOfJitAllocationAt(Address inner_pointer);
+  // Try to lookup the start of a jit allocation from inside a signal handler,
+  // returning std::nullopt if a required lock is already held.
+  static std::optional<Address> TryLookupStartOfJitAllocationAt(
+      Address inner_pointer);
   static std::optional<Address> StartOfJitAllocationAt(Address inner_pointer);
 
   // Write-protect a given range of memory. Address and size need to be page
@@ -293,6 +287,10 @@ class V8_EXPORT ThreadIsolation {
   class V8_EXPORT JitPageReference {
    public:
     JitPageReference(class JitPage* page, Address address);
+    JitPageReference(base::MutexGuard&& page_lock, class JitPage* page,
+                     Address address);
+    static std::optional<JitPageReference> TryLock(class JitPage* page,
+                                                   Address address);
     JitPageReference(JitPageReference&&) V8_NOEXCEPT = default;
     JitPageReference(const JitPageReference&) = delete;
     JitPageReference& operator=(const JitPageReference&) = delete;
@@ -311,9 +309,11 @@ class V8_EXPORT ThreadIsolation {
                                      const std::vector<base::Address>& addr);
     void UnregisterRange(base::Address addr, size_t size);
 
-    base::Address StartOfAllocationAt(base::Address inner_pointer);
+    std::optional<base::Address> StartOfAllocationAt(
+        base::Address inner_pointer);
     std::pair<base::Address, JitAllocation&> AllocationContaining(
         base::Address addr);
+    base::Address EndOfLastAllocation();
 
     bool Empty() const { return jit_page_->allocations_.empty(); }
     void Shrink(class JitPage* tail);
@@ -343,8 +343,6 @@ class V8_EXPORT ThreadIsolation {
     size_t size_;
 
     friend class JitPageReference;
-    // Allow CanLookupStartOfJitAllocationAt to check if the mutex is locked.
-    friend bool ThreadIsolation::CanLookupStartOfJitAllocationAt(Address);
   };
 
  private:
@@ -394,6 +392,8 @@ class V8_EXPORT ThreadIsolation {
   static JitPageReference LookupJitPageLocked(Address addr, size_t size);
   static std::optional<JitPageReference> TryLookupJitPage(Address addr,
                                                           size_t size);
+  static std::optional<JitPageReference> TryLookupJitPageWithoutBlocking(
+      Address addr);
   // The caller needs to hold a lock of the jit_pages_mutex_
   static std::optional<JitPageReference> TryLookupJitPageLocked(Address addr,
                                                                 size_t size);
@@ -451,7 +451,8 @@ class WritableJitAllocation {
   V8_INLINE void WriteProtectedPointerHeaderSlot(Tagged<T> value,
                                                  RelaxedStoreTag);
   template <typename T>
-  V8_INLINE void WriteHeaderSlot(Address address, T value, RelaxedStoreTag);
+  V8_INLINE void WriteHeaderSlot(Address address, Tagged<T> value,
+                                 RelaxedStoreTag);
 
   // CopyCode and CopyData have the same implementation at the moment, but
   // they will diverge once we implement validation.

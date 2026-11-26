@@ -10,7 +10,6 @@
 #include <limits.h>
 #include <pthread.h>
 
-#include "src/base/fpu.h"
 #include "src/base/logging.h"
 #if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <pthread_np.h>  // for pthread_set_name_np
@@ -82,7 +81,19 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
-#if defined(V8_OS_SOLARIS)
+/*
+ * NOTE: illumos starting with illumos#14418 (pushed April 20th, 2022)
+ * prototypes madvise(3C) properly with a `void *` first argument.
+ * The only way to detect this outside of configure-time checking is to
+ * check for the existence of MEMCNTL_SHARED, which gets defined for the first
+ * time in illumos#14418 under the same circumstances save _STRICT_POSIX, which
+ * thankfully neither Solaris nor illumos builds of Node or V8 do.
+ *
+ * If some future illumos push changes the MEMCNTL_SHARED assumptions made
+ * above, the illumos check below will have to be revisited.  This check
+ * will work on both pre-and-post illumos#14418 illumos environments.
+ */
+#if defined(V8_OS_SOLARIS) && !(defined(__illumos__) && defined(MEMCNTL_SHARED))
 #if (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE > 2) || defined(__EXTENSIONS__)
 extern "C" int madvise(caddr_t, size_t, int);
 #else
@@ -144,16 +155,8 @@ int GetFlagsForMemoryPermission(OS::MemoryPermission access, PageType page_type,
 #if !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX && !defined(V8_OS_IOS)
     flags |= MAP_NORESERVE;
 #elif defined(V8_OS_IOS)
-    // iOS jailbreak port: do NOT set MAP_NORESERVE on iOS. On this device the
-    // kernel REJECTS a large PROT_NONE reservation when MAP_NORESERVE is set —
-    // V8's CodeRange (up to 256MB) failed to reserve at EVERY size 256..64MB,
-    // while an otherwise-identical plain mmap WITHOUT MAP_NORESERVE succeeded at
-    // the full 256MB at the same instant (proven on-device by CODERANGE_PROBE).
-    // That reservation failure is what made JIT OOM at InitCodeRangeOnce and
-    // black-screen. iOS has no swap, so MAP_NORESERVE ("don't reserve swap") is
-    // meaningless for backing, and a PROT_NONE mapping faults in no physical
-    // pages regardless — so dropping it costs nothing and finally lets V8
-    // reserve the CodeRange, unblocking JIT.
+    // На iOS без MAP_NORESERVE, ядро з ним відхиляє великий резерв
+    // свопу нема тож прапорець і так нічого не дає
 #endif
 #if V8_OS_QNX
     flags |= MAP_LAZY;
@@ -169,18 +172,8 @@ int GetFlagsForMemoryPermission(OS::MemoryPermission access, PageType page_type,
 #if !defined(V8_OS_IOS)
     flags |= MAP_JIT;
 #else
-    // iOS jailbreak port: do NOT use MAP_JIT on iOS. MAP_JIT pages are W^X
-    // hardware-enforced (APRR) and require a write-protect toggle to flip
-    // between writable and executable — pthread_jit_write_protect on macOS, or
-    // BrowserEngineCore's be_memory_* on iOS 17.4+. This build targets iOS 14,
-    // so V8_HAS_BECORE_JIT_WRITE_PROTECT == 0 and RwxMemoryWriteScope's toggle
-    // is a NO-OP (see code-memory-access-inl.h). A MAP_JIT page therefore stays
-    // in one APRR state and V8's first JIT write (or execute) faults — which is
-    // exactly the "renderer never paints, then dies" we see with JIT enabled.
-    // On a jailbroken device `dynamic-codesigning` (AMFI patched) grants plain
-    // RWX, so omit MAP_JIT and use a plain RWX mapping: no APRR, no toggle
-    // needed, V8 writes then executes freely. This is the classic pre-MAP_JIT
-    // jailbreak JIT model.
+    // На iOS без MAP_JIT, бо перемикача W^X під iOS 14 нема
+    // MAP_JIT застрягає в одному стані APRR
 #endif  // !defined(V8_OS_IOS)
   }
 #endif  // V8_OS_DARWIN
@@ -400,8 +393,9 @@ void* OS::GetRandomMmapAddr() {
   // configurations.
   raw_addr = RoundDown(raw_addr, AllocatePageSize());
 #endif
-#if defined(V8_USE_ADDRESS_SANITIZER) || defined(MEMORY_SANITIZER) || \
-    defined(THREAD_SANITIZER) || defined(LEAK_SANITIZER)
+#if defined(V8_HOST_ARCH_64_BIT) &&                                    \
+    (defined(V8_USE_ADDRESS_SANITIZER) || defined(MEMORY_SANITIZER) || \
+     defined(THREAD_SANITIZER) || defined(LEAK_SANITIZER))
   // If random hint addresses interfere with address ranges hard coded in
   // sanitizers, bad things happen. This address range is copied from TSAN
   // source but works with all tools.
@@ -1113,8 +1107,7 @@ void OS::VPrintError(const char* format, va_list args) {
 #endif
 }
 
-
-int OS::SNPrintF(char* str, int length, const char* format, ...) {
+int OS::SNPrintF(char* str, size_t length, const char* format, ...) {
   va_list args;
   va_start(args, format);
   int result = VSNPrintF(str, length, format, args);
@@ -1122,27 +1115,23 @@ int OS::SNPrintF(char* str, int length, const char* format, ...) {
   return result;
 }
 
-
-int OS::VSNPrintF(char* str,
-                  int length,
-                  const char* format,
-                  va_list args) {
+int OS::VSNPrintF(char* str, size_t length, const char* format, va_list args) {
   int n = vsnprintf(str, length, format, args);
-  if (n < 0 || n >= length) {
+  if (n < 0 || static_cast<size_t>(n) >= length) {
     // If the length is zero, the assignment fails.
-    if (length > 0)
+    if (length > 0) {
       str[length - 1] = '\0';
+    }
     return -1;
   } else {
     return n;
   }
 }
 
-
 // ----------------------------------------------------------------------------
 // POSIX string support.
 
-void OS::StrNCpy(char* dest, int length, const char* src, size_t n) {
+void OS::StrNCpy(char* dest, size_t length, const char* src, size_t n) {
   strncpy(dest, src, n);
 }
 
@@ -1285,9 +1274,7 @@ static void SetThreadName(const char* name) {
 }
 
 static void* ThreadEntry(void* arg) {
-  // Reset denormals state to default, in case we picked up a non-default one
-  // with the posix clone() call.
-  base::FPU::SetFlushDenormals(false);
+  Stack::SetCurrentThreadStackStart();
 
   Thread* thread = reinterpret_cast<Thread*>(arg);
   // We take the lock here to make sure that pthread_create finished first since
@@ -1506,14 +1493,46 @@ Stack::StackSlot Stack::ObtainCurrentThreadStackStart() {
 #endif  // V8_OS_ZOS
 }
 
+// static
+Stack::StackSlot Stack::ObtainCurrentThreadStackReservedLimit() {
+#if V8_OS_ZOS
+  return nullptr;
+#elif V8_OS_OPENBSD
+  stack_t stack;
+  int error = pthread_stackseg_np(pthread_self(), &stack);
+  if (error) {
+    DCHECK(MainThreadIsCurrentThread());
+    return nullptr;
+  }
+  return stack.ss_sp;
+#else
+// For most libcs, pthread_getattr_np() returns the the stack reserved
+// limit on the main thread, but musl only returns the current high-water
+// mark at the time of the call. There's no macro to detect musl, so
+// let the caller do a fallback in cases where the libc is not one that
+// is known to work.
+#if V8_OS_LINUX && !V8_LIBC_GLIBC && !V8_LIBC_BIONIC && !V8_LIBC_UCLIBC
+  if (syscall(__NR_gettid) == getpid()) return nullptr;
+#endif
+  pthread_attr_t attr;
+  int error = pthread_getattr_np(pthread_self(), &attr);
+  if (error) {
+    DCHECK(MainThreadIsCurrentThread());
+    return nullptr;
+  }
+  void* base;
+  size_t size;
+  error = pthread_attr_getstack(&attr, &base, &size);
+  CHECK(!error);
+  pthread_attr_destroy(&attr);
+  return base;
+#endif  // V8_OS_ZOS
+}
+
 #endif  // !defined(V8_OS_FREEBSD) && !defined(V8_OS_DARWIN) &&
         // !defined(_AIX) && !defined(V8_OS_SOLARIS)
 
-// static
-void Stack::SaveStackLimit() { UNREACHABLE(); }
 
-// static
-Stack::StackSlot Stack::GetStackLimit() { UNREACHABLE(); }
 
 // static
 void Stack::SetCurrentThreadStackBounds(uintptr_t, uintptr_t) { UNREACHABLE(); }

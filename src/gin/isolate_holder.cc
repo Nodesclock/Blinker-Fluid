@@ -14,6 +14,7 @@
 #include <optional>
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/check_op.h"
 #include "base/system/sys_info.h"
 #include "base/task/current_thread.h"
@@ -30,6 +31,10 @@
 #include "v8/include/v8-locker.h"
 #include "v8/include/v8-snapshot.h"
 
+#if BUILDFLAG(IS_IOS)
+extern "C" const char* BlinkBootLogPath();
+#endif
+
 namespace gin {
 
 namespace {
@@ -37,14 +42,12 @@ v8::ArrayBuffer::Allocator* g_array_buffer_allocator = nullptr;
 const intptr_t* g_reference_table = nullptr;
 v8::FatalErrorCallback g_fatal_error_callback = nullptr;
 
-// iOS JIT diagnostics: append a marker to the boot log (the shell's BlinkBootLog
-// truncated it at process start, so we append). Pinpoints whether V8 Isolate
-// init — which reserves V8 memory regions and deserializes the startup snapshot
-// — completes. In experimental JIT mode this can still pinpoint executable
-// memory failures; in the normal jitless fallback it only means isolate init
-// completed. Pure C, no malloc.
 void BlinkJitMark(const char* s) {
+#if BUILDFLAG(IS_IOS)
+  FILE* f = fopen(BlinkBootLogPath(), "a");
+#else
   FILE* f = fopen("/var/mobile/Documents/blink_boot.log", "a");
+#endif
   if (f) {
     fprintf(f, "%ld %s\n", (long)time(nullptr), s);
     fclose(f);
@@ -209,7 +212,7 @@ IsolateHolder::getDefaultIsolateParams() {
       std::make_unique<v8::Isolate::CreateParams>();
   params->code_event_handler = DebugImpl::GetJitCodeEventHandler();
   params->constraints.ConfigureDefaults(
-      base::SysInfo::AmountOfPhysicalMemory().InBytesUnsigned(),
+      base::SysInfo::AmountOfTotalPhysicalMemory().InBytes(),
       base::SysInfo::AmountOfVirtualMemory().InBytes());
   params->array_buffer_allocator = g_array_buffer_allocator;
   params->allow_atomics_wait = true;

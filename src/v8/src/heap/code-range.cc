@@ -5,6 +5,7 @@
 #include "src/heap/code-range.h"
 
 #include "src/common/code-memory-access.h"
+#include "src/common/ios-code-memory-access.h"
 
 #include <algorithm>
 #include <atomic>
@@ -30,6 +31,13 @@
 #include <sys/mman.h>
 #endif
 
+#if defined(V8_OS_IOS)
+// Справжній шлях дає shell_main.cc, тут лиш запасний для інших бінарниках
+extern "C" __attribute__((weak)) const char* BlinkBootLogPath() {
+  return "/var/mobile/Documents/blink_boot.log";
+}
+#endif
+
 namespace v8 {
 namespace internal {
 
@@ -40,19 +48,26 @@ DEFINE_LAZY_LEAKY_OBJECT_GETTER(CodeRangeAddressHint, GetCodeRangeAddressHint)
 void FunctionInStaticBinaryForAddressHint() {}
 
 #if defined(V8_TARGET_OS_IOS)
-// Records the selected code-range size in the existing boot log.
+const char* CodeRangeLogPath() {
+#if defined(V8_OS_IOS)
+  return BlinkBootLogPath();
+#else
+  return "/var/mobile/Documents/blink_boot.log";
+#endif
+}
+
 void CodeRangeBootLog(const char* stage, size_t bytes) {
-  FILE* f = fopen("/var/mobile/Documents/blink_boot.log", "a");
+  FILE* f = fopen(CodeRangeLogPath(), "a");
   if (!f) return;
   fprintf(f, "%ld CODERANGE: %s size=%zuMB\n", static_cast<long>(time(nullptr)),
           stage, bytes / (1024 * 1024));
   fclose(f);
 }
 
-// Compares a failed cage reservation with a plain PROT_NONE mapping.
+// Чи пройде простий PROT_NONE mmap там де резерв клітки впав
 bool CodeRangePlainMmapProbe(size_t bytes) {
   void* p = mmap(nullptr, bytes, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
-  FILE* f = fopen("/var/mobile/Documents/blink_boot.log", "a");
+  FILE* f = fopen(CodeRangeLogPath(), "a");
   if (f) {
     if (p == MAP_FAILED) {
       fprintf(f, "%ld CODERANGE_PROBE: plain mmap FAILED size=%zuMB errno=%d\n",
@@ -69,7 +84,7 @@ bool CodeRangePlainMmapProbe(size_t bytes) {
   }
   return false;
 }
-#endif  // V8_TARGET_OS_IOS
+#endif
 
 }  // anonymous namespace
 
@@ -240,9 +255,8 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   // TODO(https://crbug.com/40096218): investigate this ChromeOS issue.
   params.requested_start_hint = kNullAddress;
 #if defined(V8_TARGET_OS_IOS)
-  // Retry smaller code ranges when address-space fragmentation prevents the
-  // requested reservation. V8 can operate with the minimum range and will
-  // discard compiled code sooner as needed.
+  // Адресний простір фрагментований, пробуєм менші range
+  // V8 і з мінімальним живе, просто скидає код раніше
   bool code_range_reserved = false;
   size_t attempt_size = requested;
   for (;;) {
@@ -260,7 +274,6 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   }
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
   if (code_range_reserved) {
-    // Register the range on the iOS path; other platforms register below.
     IOSCodeRangeWriteProtect::RegisterCodeRange(region().begin(),
                                                 region().size());
     CodeRangeBootLog("ios wx registered range", region().size());
@@ -269,7 +282,6 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   if (!code_range_reserved) {
     CodeRangeBootLog("all attempts failed, staying jitless-equivalent",
                      requested);
-    // Log the largest plain mapping that still fits after total failure.
     const size_t kProbes[] = {48 * MB, 32 * MB, 24 * MB, 16 * MB,
                               8 * MB,  4 * MB,  1 * MB};
     for (size_t probe : kProbes) {
@@ -279,7 +291,7 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   }
 #else
   if (!VirtualMemoryCage::InitReservation(params)) return false;
-#endif  // V8_TARGET_OS_IOS
+#endif
 #else
   constexpr size_t kRadiusInMB =
       kMaxPCRelativeCodeRangeInMB > 1024 ? kMaxPCRelativeCodeRangeInMB : 4096;
@@ -480,9 +492,8 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
                    base, size, PageAllocator::kReadExecute)) {
       return false;
     } else {
-      // iOS refuses to execute a page that is also writable, so the range is
-      // committed RX and flipped to RW only around writes. Hand the range to
-      // the scope implementation that performs those flips.
+      // iOS не виконує writable сторінку, тому range RX
+      // і стає RW лиш на час запису
       IOSCodeRangeWriteProtect::RegisterCodeRange(
           reinterpret_cast<Address>(base), size);
     }
@@ -574,6 +585,9 @@ void CodeRange::Free() {
   // DCHECK(!immutable_);
 
   if (IsReserved()) {
+#if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
+    UnregisterIOSCodeRange(region().begin());
+#endif
 #if defined(V8_OS_WIN64)
     if (win64_unwindinfo::CanRegisterUnwindInfoForNonABICompliantCodeRange()) {
       win64_unwindinfo::UnregisterNonABICompliantCodeRange(
@@ -682,8 +696,15 @@ uint8_t* CodeRange::RemapEmbeddedBuiltins(Isolate* isolate,
     // Builtins should start at a page boundary, see
     // platform-embedded-file-writer-mac.cc. If it's not the case (e.g. if the
     // embedded builtins are not coming from the binary), fall back to copying.
-    if (IsAligned(reinterpret_cast<uintptr_t>(embedded_blob_code),
-                  commit_page_size)) {
+    bool source_is_remappable = IsAligned(
+        reinterpret_cast<uintptr_t>(embedded_blob_code), commit_page_size);
+#if defined(V8_OS_LINUX)
+    // On Linux, RemapPages is destructive unless the source is a
+    // file-backed mapping, so only remap when the embedded blob is the one
+    // embedded in the binary (and hence file-backed).
+    source_is_remappable &= Isolate::CurrentEmbeddedBlobIsBinaryEmbedded();
+#endif
+    if (source_is_remappable) {
       bool ok = base::OS::RemapPages(embedded_blob_code, code_size,
                                      embedded_blob_code_copy,
                                      base::OS::MemoryPermission::kReadExecute);

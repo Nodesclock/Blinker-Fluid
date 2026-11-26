@@ -82,9 +82,8 @@ V8_INLINE void MutablePage::RawSetTrustedAndUntrustedFlags(
 #endif  // V8_ENABLE_SANDBOX
   trusted_main_thread_flags_ = new_flags;
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
-  // A code chunk's in-page header is on an RX page, and the RwxMemoryWriteScope
-  // that GC flag updates rely on is a no-op under the mirror, so route this write
-  // through the RW mirror (identity for non-code-range chunks).
+  // Заголовок code chunk лежить на RX сторінці, а RwxMemoryWriteScope під
+  // дзеркалом нічого не робить. Тому пишем через RW дзеркало.
   reinterpret_cast<MemoryChunk*>(IOSCodeRangeWriteProtect::MirrorWriteAddress(
       reinterpret_cast<Address>(Chunk())))
       ->untrusted_main_thread_flags_ = trusted_main_thread_flags_;

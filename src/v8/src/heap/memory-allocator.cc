@@ -32,9 +32,8 @@
 namespace v8::internal {
 
 namespace {
-// The MemoryChunk header of an executable chunk is placement-new'd directly into
-// the (RX) code range, so on the iOS mirror build it must be written through the
-// RW mirror. Identity for non-code-range addresses and other configs.
+// Заголовок виконуваного chunk ставиться placement new прямо в RX code range,
+// тому на iOS пишем через RW дзеркало.
 V8_INLINE void* CodeChunkHeaderWriteAddr(void* chunk) {
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
   return reinterpret_cast<void*>(IOSCodeRangeWriteProtect::MirrorWriteAddress(
@@ -358,14 +357,13 @@ void MemoryAllocator::FreeReadOnlyPage(ReadOnlyPage* chunk) {
 }
 
 void MemoryAllocator::PreFreeMemory(MutablePage* chunk_metadata) {
-  MemoryChunk* chunk = chunk_metadata->Chunk();
   DCHECK(!chunk_metadata->is_pre_freed());
   LOG(isolate_, DeleteEvent("MemoryChunk", chunk_metadata));
   RecordMemoryChunkDestroyed(chunk_metadata);
   UnregisterMutableMemoryChunk(chunk_metadata);
   isolate_->heap()->RememberUnmappedPage(
       reinterpret_cast<Address>(chunk_metadata),
-      chunk->IsEvacuationCandidate());
+      chunk_metadata->is_evacuation_candidate());
   chunk_metadata->ReleaseAllAllocatedMemory();
   chunk_metadata->set_is_pre_freed();
 }
@@ -373,7 +371,7 @@ void MemoryAllocator::PreFreeMemory(MutablePage* chunk_metadata) {
 void MemoryAllocator::PerformFreeMemory(MutablePage* chunk_metadata) {
   DCHECK(chunk_metadata->is_unregistered());
   DCHECK(chunk_metadata->is_pre_freed());
-  DCHECK(!chunk_metadata->Chunk()->InReadOnlySpace());
+  DCHECK(!chunk_metadata->IsReadOnlyPage());
 
   DeleteMemoryChunk(chunk_metadata);
 }
@@ -707,9 +705,7 @@ bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,
     // The pages of the code range are already mapped RWX, we just need to
     // recommit them.
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
-    // ...except on iOS, where the range is RX and writes go through
-    // RwxMemoryWriteScope. Recommitting RWX here would hand back pages the
-    // kernel refuses to execute.
+    // На iOS range RX, а RWX сторінки ядро виконувати не дасть.
     return vm->RecommitPages(start, chunk_size, PageAllocator::kReadExecute);
 #else
     return vm->RecommitPages(start, chunk_size,
@@ -752,8 +748,9 @@ const MemoryChunk* MemoryAllocator::LookupChunkContainingAddressInSafepoint(
     DCHECK_LE(large_page_chunk->address(), addr);
     // This code can run from the shared heap isolate and the slot may point
     // into a client heap isolate, so ignore the isolate check.
-    if (large_page_chunk->MetadataNoIsolateCheck()->Contains(addr))
+    if (large_page_chunk->MetadataNoIsolateCheck()->Contains(addr)) {
       return large_page_chunk;
+    }
   }
   // Not found in any page.
   return nullptr;

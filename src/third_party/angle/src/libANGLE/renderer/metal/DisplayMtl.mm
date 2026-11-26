@@ -6,15 +6,12 @@
 
 // DisplayMtl.mm: Metal implementation of DisplayImpl
 
-#ifdef UNSAFE_BUFFERS_BUILD
-#    pragma allow_unsafe_buffers
-#endif
-
 #include "libANGLE/renderer/metal/DisplayMtl.h"
 #include <sys/param.h>
 
 #include "common/apple_platform_utils.h"
 #include "common/system_utils.h"
+#include "common/unsafe_buffers.h"
 #include "gpu_info_util/SystemInfo.h"
 #include "libANGLE/Context.h"
 #include "libANGLE/Display.h"
@@ -178,12 +175,12 @@ void DisplayMtl::terminate()
     mIsAMDBronze         = false;
 }
 
-bool DisplayMtl::testDeviceLost()
+bool ThreadSafeDisplayMtl::testDeviceLost()
 {
     return false;
 }
 
-egl::Error DisplayMtl::restoreLostDevice(const egl::Display *display)
+egl::Error ThreadSafeDisplayMtl::restoreLostDevice(const egl::ThreadSafeDisplay *display)
 {
     return egl::NoError();
 }
@@ -337,11 +334,10 @@ egl::Error DisplayMtl::waitNative(const gl::Context *context, EGLint engine)
 
 egl::Error DisplayMtl::waitUntilWorkScheduled()
 {
-    for (auto context : mState.contextMap)
-    {
-        auto contextMtl = GetImplAs<ContextMtl>(context.second);
+    mState.contextMap.forEach([](gl::Context *context) {
+        auto contextMtl = GetImplAs<ContextMtl>(context);
         contextMtl->flushCommandBuffer(mtl::WaitUntilScheduled);
-    }
+    });
     return egl::NoError();
 }
 
@@ -448,15 +444,14 @@ gl::Version DisplayMtl::getMaxConformantESVersion() const
     return std::min(getMaxSupportedESVersion(), gl::Version(3, 0));
 }
 
-EGLSyncImpl *DisplayMtl::createSync()
+EGLSyncImpl *ThreadSafeDisplayMtl::createSync()
 {
     return new EGLSyncMtl();
 }
 
-egl::Error DisplayMtl::makeCurrent(egl::Display *display,
-                                   egl::Surface *drawSurface,
-                                   egl::Surface *readSurface,
-                                   gl::Context *context)
+egl::Error ThreadSafeDisplayMtl::makeCurrent(egl::Surface *drawSurface,
+                                             egl::Surface *readSurface,
+                                             gl::Context *context)
 {
     if (!context)
     {
@@ -468,6 +463,7 @@ egl::Error DisplayMtl::makeCurrent(egl::Display *display,
 
 void DisplayMtl::generateExtensions(egl::DisplayExtensions *outExtensions) const
 {
+    outExtensions->createContextRobustness    = true;
     outExtensions->iosurfaceClientBuffer      = true;
     outExtensions->surfacelessContext         = true;
     outExtensions->noConfigContext            = true;
@@ -512,6 +508,12 @@ void DisplayMtl::initializeFrontendFeatures(angle::FrontendFeatures *features) c
     // The Metal backend's handling of compile and link is thread-safe
     ANGLE_FEATURE_CONDITION(features, compileJobIsThreadSafe, true);
     ANGLE_FEATURE_CONDITION(features, linkJobIsThreadSafe, true);
+
+    ANGLE_FEATURE_CONDITION(features, setNeedInitOnInvalidation, true);
+
+    // Metal compiler optimizations may remove infinite loops causing crashes later in shader
+    // execution. http://crbug.com/41486305
+    ANGLE_FEATURE_CONDITION(features, ensureLoopForwardProgress, true);
 }
 
 void DisplayMtl::populateFeatureList(angle::FeatureList *features)
@@ -798,6 +800,15 @@ void DisplayMtl::ensureCapsInitialized() const
         mMaxColorTargetBits = mNativeCaps.maxColorAttachments * 32;
     }
 
+    if (!mFeatures.limitMaxVisibilityQueryOffset.enabled && supportsAppleGPUFamily(7))
+    {
+        mMaxVisibilityQueryOffset = 262136;
+    }
+    else
+    {
+        mMaxVisibilityQueryOffset = 65528;
+    }
+
     // MSAA
     mNativeCaps.maxSamples             = mFormatTable.getMaxSamples();
     mNativeCaps.maxSampleMaskWords     = 1;
@@ -906,9 +917,6 @@ void DisplayMtl::ensureCapsInitialized() const
     // Metal doesn't support GL_TEXTURE_COMPARE_MODE=GL_NONE for shadow samplers
     mNativeLimitations.noShadowSamplerCompareModeNone = true;
 
-    // Apple platforms require PVRTC1 textures to be squares.
-    mNativeLimitations.squarePvrtc1 = true;
-
     if (mFeatures.disableProgrammableBlending.enabled || !supportsAppleGPUFamily(1))
     {
         const MTLReadWriteTextureTier readWriteTextureTier = [mMetalDevice readWriteTextureSupport];
@@ -952,6 +960,7 @@ void DisplayMtl::initializeExtensions() const
     mNativeExtensions.copyCompressedTextureCHROMIUM = false;
     mNativeExtensions.textureMirrorClampToEdgeEXT   = true;
     mNativeExtensions.depthClampEXT                 = true;
+    mNativeExtensions.rgbxInternalFormatANGLE       = mFeatures.hasTextureSwizzle.enabled;
 
     // EXT_debug_marker is not implemented yet, but the entry points must be exposed for the
     // Metal backend to be used in Chrome (http://anglebug.com/42263519)
@@ -1061,6 +1070,8 @@ void DisplayMtl::initializeExtensions() const
 
     mNativeExtensions.packReverseRowOrderANGLE = true;
 
+    mNativeExtensions.framebufferFlipYMESA = true;
+
     if (mFeatures.hasEvents.enabled)
     {
         // MTLSharedEvent is only available since Metal 2.1
@@ -1090,6 +1101,9 @@ void DisplayMtl::initializeExtensions() const
     // GL_EXT_blend_func_extended
     mNativeExtensions.blendFuncExtendedEXT = true;
     mNativeCaps.maxDualSourceDrawBuffers   = 1;
+
+    // GL_ANGLE_trim_memory
+    mNativeExtensions.trimMemoryANGLE = true;
 
     // GL_ANGLE_shader_pixel_local_storage.
     if (!mFeatures.disableProgrammableBlending.enabled && supportsAppleGPUFamily(1))
@@ -1194,7 +1208,6 @@ void DisplayMtl::initializeTextureCaps() const
     // Disable all depth buffer and stencil buffer readback extensions until we need them
     mNativeExtensions.readDepthNV         = false;
     mNativeExtensions.readStencilNV       = false;
-    mNativeExtensions.depthBufferFloat2NV = false;
 }
 
 void DisplayMtl::initializeFeatures()
@@ -1211,6 +1224,11 @@ void DisplayMtl::initializeFeatures()
     }
 
     ANGLE_FEATURE_CONDITION((&mFeatures), allowGenMultipleMipsPerPass, true);
+
+    // TODO(anglebug.com/537661068): using visibility query offset > 65528 causes bugs in the Apple
+    // Silicon driver.
+    ANGLE_FEATURE_CONDITION((&mFeatures), limitMaxVisibilityQueryOffset, true);
+
     ANGLE_FEATURE_CONDITION((&mFeatures), forceBufferGPUStorage, false);
     ANGLE_FEATURE_CONDITION((&mFeatures), hasExplicitMemBarrier, (isOSX || isCatalyst) && !isARM);
     ANGLE_FEATURE_CONDITION((&mFeatures), hasDepthAutoResolve, supportsEitherGPUFamily(3, 2));
@@ -1259,6 +1277,7 @@ void DisplayMtl::initializeFeatures()
                             isSimulator || !supportsAppleGPUFamily(1));
 
     ANGLE_FEATURE_CONDITION((&mFeatures), writeHelperSampleMask, supportsAppleGPUFamily(1));
+    ANGLE_FEATURE_CONDITION((&mFeatures), purgeableBufferPool, false);
 
     ANGLE_FEATURE_CONDITION((&mFeatures), multisampleColorFormatShaderReadWorkaround, isAMD());
     ANGLE_FEATURE_CONDITION((&mFeatures), copyIOSurfaceToNonIOSurfaceForReadOptimization,
@@ -1295,8 +1314,6 @@ void DisplayMtl::initializeFeatures()
     ANGLE_FEATURE_CONDITION(&mFeatures, disableStagedInitializationOfPackedTextureFormats,
                             isIntel() || isAMD());
 
-    ANGLE_FEATURE_CONDITION((&mFeatures), generateShareableShaders, true);
-
     // http://anglebug.com/42266609: NVIDIA GPUs are unsupported due to scarcity of the hardware.
     ANGLE_FEATURE_CONDITION((&mFeatures), disableMetalOnNvidia, true);
 
@@ -1320,10 +1337,6 @@ void DisplayMtl::initializeFeatures()
     // the textureGrad shadow sampler emulation. The latter is used only on AMD.
     ASSERT(!mFeatures.preTransformTextureCubeGradDerivatives.enabled ||
            mFeatures.allowSamplerCompareGradient.enabled);
-
-    // Metal compiler optimizations may remove infinite loops causing crashes later in shader
-    // execution. http://crbug.com/41486305
-    ANGLE_FEATURE_CONDITION((&mFeatures), ensureLoopForwardProgress, true);
 }
 
 angle::Result DisplayMtl::initializeShaderLibrary()
@@ -1431,9 +1444,9 @@ bool DisplayMtl::isAMDBronzeDriver() const
         @"Radeon Pro 570",  @"Radeon Pro 570X", @"Radeon Pro 575", @"Radeon Pro 575X",
         @"Radeon Pro 580",  @"Radeon Pro 580X"};
 
-    for (size_t i = 0; i < ArraySize(kMTLBronzeDeviceNames); ++i)
+    for (NSString *deviceName : kMTLBronzeDeviceNames)
     {
-        if ([[mMetalDevice name] hasSuffix:kMTLBronzeDeviceNames[i]])
+        if ([[mMetalDevice name] hasSuffix:deviceName])
         {
             mIsAMDBronze = true;
             break;

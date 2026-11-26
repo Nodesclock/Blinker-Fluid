@@ -11,6 +11,8 @@
 #include "src/flags/flags.h"
 #include "src/objects/instruction-stream.h"
 #include "src/objects/tagged.h"
+#include "src/utils/memcopy.h"
+
 #if V8_HAS_PKU_JIT_WRITE_PROTECT
 #include "src/base/platform/memory-protection-key.h"
 #endif
@@ -24,11 +26,8 @@
 namespace v8 {
 namespace internal {
 
-// On iOS the code range is executed through an RX mapping whose permissions
-// never change; every code write is redirected to a RW "mirror" of the same
-// physical pages (see IOSCodeRangeWriteProtect). This helper translates a
-// logical code-range address to its write address. It is the identity on every
-// other platform, so the write primitives below read the same on all targets.
+// На iOS code range RX, запис іде через RW дзеркало
+// на інших платформах це identity
 V8_INLINE Address JitWriteAddr(Address addr) {
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
   return IOSCodeRangeWriteProtect::MirrorWriteAddress(addr);
@@ -47,8 +46,8 @@ RwxMemoryWriteScope::RwxMemoryWriteScope(const char* comment, Address addr,
                                          size_t size) {
   if (!v8_flags.jitless || v8_flags.force_memory_protection_keys) {
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT
-    // Only these pages become writable; the rest of the code range stays
-    // executable so other threads can keep running generated code.
+    // Writable тільки ці сторінки, решта code range
+    // лишається виконуваною для інших потоків
     IOSCodeRangeWriteProtect::SetWritableRange(addr, size);
 #else
     SetWritable();
@@ -176,7 +175,7 @@ void WritableJitAllocation::WriteHeaderSlot(T value) {
   // non-implemented functionality.
   static_assert(!is_taggable_v<T>);
 
-  if constexpr (offset == HeapObject::kMapOffset) {
+  if constexpr (offset == offsetof(HeapObject, map_)) {
     TaggedField<T, offset>::Relaxed_Store_Map_Word(
         HeapObject::FromAddress(JitWriteAddr(address_)), value);
   } else {
@@ -190,7 +189,7 @@ void WritableJitAllocation::WriteHeaderSlot(Tagged<T> value, ReleaseStoreTag) {
       WriteScopeForApiEnforcement();
   // These asserts are no strict requirements, they just guard against
   // non-implemented functionality.
-  static_assert(offset != HeapObject::kMapOffset);
+  static_assert(offset != offsetof(HeapObject, map_));
 
   TaggedField<T, offset>::Release_Store(
       HeapObject::FromAddress(JitWriteAddr(address_)), value);
@@ -200,7 +199,7 @@ template <typename T, size_t offset>
 void WritableJitAllocation::WriteHeaderSlot(Tagged<T> value, RelaxedStoreTag) {
   std::optional<RwxMemoryWriteScope> write_scope =
       WriteScopeForApiEnforcement();
-  if constexpr (offset == HeapObject::kMapOffset) {
+  if constexpr (offset == offsetof(HeapObject, map_)) {
     TaggedField<T, offset>::Relaxed_Store_Map_Word(
         HeapObject::FromAddress(JitWriteAddr(address_)), value);
   } else {
@@ -212,7 +211,7 @@ void WritableJitAllocation::WriteHeaderSlot(Tagged<T> value, RelaxedStoreTag) {
 template <typename T, size_t offset>
 void WritableJitAllocation::WriteProtectedPointerHeaderSlot(Tagged<T> value,
                                                             RelaxedStoreTag) {
-  static_assert(offset != HeapObject::kMapOffset);
+  static_assert(offset != offsetof(HeapObject, map_));
   std::optional<RwxMemoryWriteScope> write_scope =
       WriteScopeForApiEnforcement();
   TaggedField<T, offset, TrustedSpaceCompressionScheme>::Relaxed_Store(
@@ -222,7 +221,7 @@ void WritableJitAllocation::WriteProtectedPointerHeaderSlot(Tagged<T> value,
 template <typename T, size_t offset>
 void WritableJitAllocation::WriteProtectedPointerHeaderSlot(Tagged<T> value,
                                                             ReleaseStoreTag) {
-  static_assert(offset != HeapObject::kMapOffset);
+  static_assert(offset != offsetof(HeapObject, map_));
   std::optional<RwxMemoryWriteScope> write_scope =
       WriteScopeForApiEnforcement();
   TaggedField<T, offset, TrustedSpaceCompressionScheme>::Release_Store(
@@ -230,21 +229,21 @@ void WritableJitAllocation::WriteProtectedPointerHeaderSlot(Tagged<T> value,
 }
 
 template <typename T>
-V8_INLINE void WritableJitAllocation::WriteHeaderSlot(Address address, T value,
+V8_INLINE void WritableJitAllocation::WriteHeaderSlot(Address address,
+                                                      Tagged<T> value,
                                                       RelaxedStoreTag tag) {
   CHECK_EQ(allocation_.Type(),
            ThreadIsolation::JitAllocationType::kInstructionStream);
   size_t offset = address - address_;
-  Tagged<T> tagged(value);
   switch (offset) {
     case InstructionStream::kCodeOffset:
-      WriteProtectedPointerHeaderSlot<T, InstructionStream::kCodeOffset>(tagged,
+      WriteProtectedPointerHeaderSlot<T, InstructionStream::kCodeOffset>(value,
                                                                          tag);
       break;
     case InstructionStream::kRelocationInfoOffset:
       WriteProtectedPointerHeaderSlot<T,
                                       InstructionStream::kRelocationInfoOffset>(
-          tagged, tag);
+          value, tag);
       break;
     default:
       UNREACHABLE();
@@ -337,13 +336,10 @@ V8_INLINE WritableFreeSpace::WritableFreeSpace(base::Address addr, size_t size,
 template <typename T, size_t offset>
 void WritableFreeSpace::WriteHeaderSlot(Tagged<T> value,
                                         RelaxedStoreTag) const {
-  // Free-space fillers written into the (RX) code range must go through the RW
-  // mirror on iOS; non-executable free space is outside the range and
-  // JitWriteAddr is a no-op for it.
   Tagged<HeapObject> object =
       HeapObject::FromAddress(executable_ ? JitWriteAddr(address_) : address_);
   // TODO(v8:13355): add validation before the write.
-  if constexpr (offset == HeapObject::kMapOffset) {
+  if constexpr (offset == offsetof(HeapObject, map_)) {
     TaggedField<T, offset>::Relaxed_Store_Map_Word(object, value);
   } else {
     TaggedField<T, offset>::Relaxed_Store(object, value);

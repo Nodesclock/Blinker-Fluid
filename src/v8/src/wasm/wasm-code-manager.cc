@@ -6,17 +6,21 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <new>
 #include <numeric>
 #include <optional>
 
 #include "src/base/atomicops.h"
 #include "src/base/build_config.h"
 #include "src/base/iterator.h"
+#include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
+#include "src/base/sanitizer/tsan.h"
 #include "src/base/small-vector.h"
 #include "src/base/string-format.h"
+#include "src/base/unique-array.h"
 #include "src/base/vector.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/codegen/assembler-inl.h"
@@ -30,6 +34,7 @@
 #include "src/logging/log.h"
 #include "src/objects/objects-inl.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
+#include "src/tracing/trace-event.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/compilation-environment.h"
@@ -299,26 +304,6 @@ void WasmCode::LogCode(Isolate* isolate, const char* source_url,
   std::string fn_name = DebugName();
   WasmName name = base::VectorOf(fn_name);
 
-  if (native_module_) {
-    const WasmModule* module = native_module_->module();
-    const WasmDebugSymbols& symbol =
-        module->debug_symbols[WasmDebugSymbols::Type::SourceMap];
-    auto load_wasm_source_map = isolate->wasm_load_source_map_callback();
-    auto source_map = native_module_->GetWasmSourceMap();
-    if (!source_map && symbol.type == WasmDebugSymbols::Type::SourceMap &&
-        !symbol.external_url.is_empty() && load_wasm_source_map) {
-      ModuleWireBytes wire_bytes(native_module_->wire_bytes());
-      WasmName external_url = wire_bytes.GetNameOrNull(symbol.external_url);
-      std::string external_url_string(external_url.data(), external_url.size());
-      HandleScope scope(isolate);
-      v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
-      Local<v8::String> source_map_str =
-          load_wasm_source_map(v8_isolate, external_url_string.c_str());
-      native_module_->SetWasmSourceMap(
-          std::make_unique<WasmModuleSourceMap>(v8_isolate, source_map_str));
-    }
-  }
-
   // Record source positions before adding code, otherwise when code is added,
   // there are no source positions to associate with the added code.
   if (!source_positions().empty()) {
@@ -361,11 +346,13 @@ void WasmCode::Validate() const {
                 std::numeric_limits<uint16_t>::max());
 
 #ifdef DEBUG
+#ifdef ENABLE_SLOW_DCHECKS
   NativeModule::CallIndirectTargetMap function_index_map;
   if (native_module_) {
     function_index_map =
         native_module_->CreateIndirectCallTargetToFunctionIndexMap();
   }
+#endif
   // Scope for foreign WasmCode pointers.
   WasmCodeRefScope code_ref_scope;
   // We expect certain relocation info modes to never appear in {WasmCode}
@@ -378,41 +365,44 @@ void WasmCode::Validate() const {
       case RelocInfo::WASM_CALL: {
         Address target = it.rinfo()->wasm_call_address();
         WasmCode* code = native_module_->Lookup(target);
-        CHECK_NOT_NULL(code);
-        CHECK_EQ(WasmCode::kJumpTable, code->kind());
-        CHECK(code->contains(target));
+        DCHECK_NOT_NULL(code);
+        DCHECK_EQ(WasmCode::kJumpTable, code->kind());
+        DCHECK(code->contains(target));
         break;
       }
       case RelocInfo::WASM_STUB_CALL: {
         Address target = it.rinfo()->wasm_stub_call_address();
         WasmCode* code = native_module_->Lookup(target);
-        CHECK_NOT_NULL(code);
-        CHECK_EQ(WasmCode::kJumpTable, code->kind());
-        CHECK(code->contains(target));
+        DCHECK_NOT_NULL(code);
+        DCHECK_EQ(WasmCode::kJumpTable, code->kind());
+        DCHECK(code->contains(target));
         break;
       }
       case RelocInfo::WASM_CANONICAL_SIG_ID: {
         uint32_t sig_id = it.rinfo()->wasm_canonical_sig_id();
-        CHECK_LE(sig_id, GetTypeCanonicalizer()->GetCurrentNumberOfTypes());
+        DCHECK_LE(sig_id, GetTypeCanonicalizer()->GetCurrentNumberOfTypes());
         break;
       }
       case RelocInfo::WASM_CODE_POINTER_TABLE_ENTRY: {
+#ifdef ENABLE_SLOW_DCHECKS
         WasmCodePointer call_target =
             it.rinfo()->wasm_code_pointer_table_entry();
         uint32_t function_index = function_index_map.at(call_target);
-        CHECK_EQ(call_target,
-                 native_module_->GetCodePointerHandle(function_index));
+        DCHECK_EQ(call_target,
+                  native_module_->GetCodePointerHandle(function_index));
+#endif
         break;
       }
       case RelocInfo::INTERNAL_REFERENCE:
       case RelocInfo::INTERNAL_REFERENCE_ENCODED: {
         Address target = it.rinfo()->target_internal_reference();
-        CHECK(contains(target));
+        DCHECK(contains(target));
         break;
       }
       case RelocInfo::EXTERNAL_REFERENCE:
       case RelocInfo::CONST_POOL:
       case RelocInfo::VENEER_POOL:
+      case RelocInfo::WASM_CODE_POINTER:
         // These are OK to appear.
         break;
       default:
@@ -495,8 +485,8 @@ void WasmCode::Disassemble(const char* name, std::ostream& os,
   if (trapping_instructions_size_ > 0) {
     os << "Trapping instructions:\n pc offset\n";
     for (auto& data : trapping_instructions()) {
-      os << std::setw(10) << std::hex << data.instr_offset << std::setw(10)
-         << "\n";
+      os << std::setw(10) << std::hex << data.instr_offset << std::dec
+         << std::setw(10) << "\n";
     }
     os << "\n";
   }
@@ -1025,10 +1015,10 @@ NativeModule::NativeModule(WasmEnabledFeatures enabled_features,
                            std::shared_ptr<NativeModule>* shared_this)
     : engine_scope_(
           GetWasmEngine()->GetBarrierForBackgroundCompile()->TryLock()),
-      code_allocator_(&counter_updates_),
       enabled_features_(enabled_features),
       compile_imports_(std::move(compile_imports)),
       module_(std::move(module)),
+      code_allocator_(&counter_updates_),
       // We don't use `std::make_shared` here because of problems with UBsan,
       // see http://b/478120402.
       fast_api_data_(new FastApiData[module_->num_imported_functions]) {
@@ -1081,13 +1071,39 @@ NativeModule::NativeModule(WasmEnabledFeatures enabled_features,
   }
 }
 
-void NativeModule::LogWasmCodes(Isolate* isolate, Tagged<Script> script) {
-  DisallowGarbageCollection no_gc;
+void NativeModule::TryLoadSourceMap(Isolate* isolate) {
+  auto load_wasm_source_map = isolate->wasm_load_source_map_callback();
+  if (!load_wasm_source_map) return;
+
+  if (GetWasmSourceMap()) return;
+
+  const WasmDebugSymbols& symbol =
+      module_->debug_symbols[WasmDebugSymbols::Type::SourceMap];
+  if (symbol.type != WasmDebugSymbols::Type::SourceMap) return;
+  if (symbol.external_url.is_empty()) return;
+
+  ModuleWireBytes wire_bytes(this->wire_bytes());
+  WasmName external_url = wire_bytes.GetNameOrNull(symbol.external_url);
+  std::string external_url_string(external_url.data(), external_url.size());
+  HandleScope scope(isolate);
+  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
+  Local<v8::String> source_map_str =
+      load_wasm_source_map(v8_isolate, external_url_string.c_str());
+  if (source_map_str.IsEmpty()) return;
+
+  SetWasmSourceMapIfUnset(
+      std::make_unique<WasmModuleSourceMap>(v8_isolate, source_map_str));
+}
+
+void NativeModule::LogWasmCodes(Isolate* isolate, DirectHandle<Script> script) {
   if (!WasmCode::ShouldBeLogged(isolate)) return;
 
   TRACE_EVENT("v8.wasm", "wasm.LogWasmCodes", "functions",
               module_->num_declared_functions);
 
+  TryLoadSourceMap(isolate);
+
+  DisallowGarbageCollection no_gc;
   Tagged<Object> url_obj = script->name();
   DCHECK(IsString(url_obj) || IsUndefined(url_obj));
   std::unique_ptr<char[]> source_url =
@@ -1102,115 +1118,122 @@ void NativeModule::LogWasmCodes(Isolate* isolate, Tagged<Script> script) {
   }
 }
 
-WasmCode* NativeModule::AddCodeForTesting(DirectHandle<Code> code,
+void NativeModule::ApplyRelocations(WritableJitAllocation& jit_allocation,
+                                    base::Vector<uint8_t> dst_code_bytes,
+                                    base::Vector<const uint8_t> reloc_info,
+                                    const CodeDesc& desc,
+                                    const JumpTablesRef& jump_tables,
+                                    WasmCode* reserved_code) const {
+  intptr_t delta = dst_code_bytes.begin() - desc.buffer;
+  int mode_mask =
+      RelocInfo::kApplyMask | RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
+      RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL) |
+      RelocInfo::ModeMask(RelocInfo::WASM_CODE_POINTER_TABLE_ENTRY) |
+      RelocInfo::ModeMask(RelocInfo::WASM_CODE_POINTER);
+  Address code_start = reinterpret_cast<Address>(dst_code_bytes.begin());
+  Address constant_pool_start = code_start + desc.constant_pool_offset;
+
+  for (WritableRelocIterator it(jit_allocation, dst_code_bytes, reloc_info,
+                                constant_pool_start, mode_mask);
+       !it.done(); it.next()) {
+    RelocInfo::Mode mode = it.rinfo()->rmode();
+    if (RelocInfo::IsWasmCall(mode)) {
+      uint32_t call_tag = it.rinfo()->wasm_call_tag();
+      Address target = GetNearCallTargetForFunction(call_tag, jump_tables);
+      it.rinfo()->set_wasm_call_address(target);
+    } else if (RelocInfo::IsWasmStubCall(mode)) {
+      uint32_t stub_call_tag = it.rinfo()->wasm_call_tag();
+      DCHECK_LT(stub_call_tag,
+                static_cast<uint32_t>(Builtin::kFirstBytecodeHandler));
+      Builtin builtin = static_cast<Builtin>(stub_call_tag);
+      Address entry = GetJumpTableEntryForBuiltin(builtin, jump_tables);
+      it.rinfo()->set_wasm_stub_call_address(entry);
+    } else if (RelocInfo::IsWasmCodePointerTableEntry(mode)) {
+      uint32_t function_index =
+          it.rinfo()->wasm_code_pointer_table_entry().value();
+      WasmCodePointer target = GetCodePointerHandle(function_index);
+      it.rinfo()->set_wasm_code_pointer_table_entry(target, SKIP_ICACHE_FLUSH);
+    } else if (RelocInfo::IsWasmCodePointer(mode)) {
+      it.rinfo()->set_wasm_code_pointer(
+          reinterpret_cast<Address>(reserved_code));
+    } else {
+      it.rinfo()->apply(delta);
+    }
+  }
+}
+
+WasmCode* NativeModule::AddCodeForTesting(const WasmCompilationResult& result,
                                           uint64_t signature_hash) {
-  const size_t relocation_size = code->relocation_size();
-  base::OwnedVector<uint8_t> reloc_info =
-      base::OwnedCopyOf(code->relocation_start(), relocation_size);
-  DirectHandle<TrustedByteArray> source_pos_table(code->source_position_table(),
-                                                  Isolate::Current());
-  uint32_t source_pos_len = source_pos_table->ulength().value();
-  base::OwnedVector<uint8_t> source_pos =
-      base::OwnedCopyOf(source_pos_table->begin(), source_pos_len);
+  DCHECK(result.succeeded());
+  const CodeDesc& desc = result.code_desc;
+  base::Vector<const uint8_t> reloc_info{
+      desc.buffer + desc.buffer_size - desc.reloc_size,
+      static_cast<size_t>(desc.reloc_size)};
 
-  static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-  base::Vector<const uint8_t> instructions(
-      reinterpret_cast<uint8_t*>(code->body_start()),
-      static_cast<size_t>(code->body_size()));
-  const int stack_slots = code->stack_slots();
-
-  // Metadata offsets in InstructionStream objects are relative to the start of
-  // the metadata section, whereas WasmCode expects offsets relative to
-  // instruction_start.
-  const int base_offset = code->instruction_size();
-  // TODO(jgruber,v8:8758): Remove this translation. It exists only because
-  // InstructionStream objects contains real offsets but WasmCode expects an
-  // offset of 0 to mean 'empty'.
   const int safepoint_table_offset =
-      code->has_safepoint_table() ? base_offset + code->safepoint_table_offset()
-                                  : 0;
-  const int handler_table_offset = base_offset + code->handler_table_offset();
-  const int constant_pool_offset = base_offset + code->constant_pool_offset();
-  const int code_comments_offset = base_offset + code->code_comments_offset();
-  const int jump_table_info_offset =
-      base_offset + code->jump_table_info_offset();
+      desc.safepoint_table_size == 0 ? 0 : desc.safepoint_table_offset;
+  const int handler_table_offset = desc.handler_table_offset;
+  const int constant_pool_offset = desc.constant_pool_offset;
+  const int code_comments_offset = desc.code_comments_offset;
+  const int jump_table_info_offset = desc.jump_table_info_offset;
+  const int instr_size = desc.instr_size;
 
   base::RecursiveMutexGuard guard{&allocation_mutex_};
   base::Vector<uint8_t> dst_code_bytes =
-      code_allocator_.AllocateForCode(this, instructions.size());
+      code_allocator_.AllocateForCode(this, desc.instr_size);
+
+  // Reserve memory for WasmCode. We need the pointer for the reloc info.
+  WasmCode* reserved_code =
+      static_cast<WasmCode*>(operator new(sizeof(WasmCode)));
+
+  JumpTablesRef jump_tables =
+      FindJumpTablesForRegionLocked(base::AddressRegionOf(dst_code_bytes));
+
   {
     WritableJitAllocation jit_allocation =
         ThreadIsolation::RegisterJitAllocation(
             reinterpret_cast<Address>(dst_code_bytes.begin()),
             dst_code_bytes.size(),
             ThreadIsolation::JitAllocationType::kWasmCode, true);
-    jit_allocation.CopyCode(0, instructions.begin(), instructions.size());
-
-    // Apply the relocation delta by iterating over the RelocInfo.
-    intptr_t delta = reinterpret_cast<Address>(dst_code_bytes.begin()) -
-                     code->instruction_start();
-    int mode_mask =
-        RelocInfo::kApplyMask | RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL) |
-        RelocInfo::ModeMask(RelocInfo::WASM_CODE_POINTER_TABLE_ENTRY);
-    auto jump_tables_ref =
-        FindJumpTablesForRegionLocked(base::AddressRegionOf(dst_code_bytes));
-    Address dst_code_addr = reinterpret_cast<Address>(dst_code_bytes.begin());
-    Address constant_pool_start = dst_code_addr + constant_pool_offset;
-    RelocIterator orig_it(*code, mode_mask);
-    for (WritableRelocIterator it(jit_allocation, dst_code_bytes,
-                                  reloc_info.as_vector(), constant_pool_start,
-                                  mode_mask);
-         !it.done(); it.next(), orig_it.next()) {
-      RelocInfo::Mode mode = it.rinfo()->rmode();
-      if (RelocInfo::IsWasmStubCall(mode)) {
-        uint32_t stub_call_tag = orig_it.rinfo()->wasm_call_tag();
-        DCHECK_LT(stub_call_tag,
-                  static_cast<uint32_t>(Builtin::kFirstBytecodeHandler));
-        Builtin builtin = static_cast<Builtin>(stub_call_tag);
-        Address entry = GetJumpTableEntryForBuiltin(builtin, jump_tables_ref);
-        it.rinfo()->set_wasm_stub_call_address(entry);
-      } else if (RelocInfo::IsWasmCodePointerTableEntry(mode)) {
-        uint32_t function_index =
-            it.rinfo()->wasm_code_pointer_table_entry().value();
-        WasmCodePointer target = GetCodePointerHandle(function_index);
-        it.rinfo()->set_wasm_code_pointer_table_entry(target,
-                                                      SKIP_ICACHE_FLUSH);
-      } else {
-        it.rinfo()->apply(delta);
-      }
-    }
+    jit_allocation.CopyCode(0, desc.buffer, desc.instr_size);
+    ApplyRelocations(jit_allocation, dst_code_bytes, reloc_info, desc,
+                     jump_tables, reserved_code);
   }
 
   // Flush the i-cache after relocation.
   FlushInstructionCache(dst_code_bytes.begin(), dst_code_bytes.size());
 
-  std::unique_ptr<WasmCode> new_code{
-      new WasmCode{this,                     // native_module
-                   kAnonymousFuncIndex,      // index
-                   dst_code_bytes,           // instructions
-                   stack_slots,              // stack_slots
-                   0,                        // ool_spills
-                   0,                        // tagged_parameter_slots
-                   safepoint_table_offset,   // safepoint_table_offset
-                   handler_table_offset,     // handler_table_offset
-                   constant_pool_offset,     // constant_pool_offset
-                   code_comments_offset,     // code_comments_offset
-                   jump_table_info_offset,   // jump_table_info_offset
-                   instructions.length(),    // unpadded_binary_size
-                   {},                       // trapping_instructions
-                   reloc_info.as_vector(),   // reloc_info
-                   source_pos.as_vector(),   // source positions
-                   {},                       // inlining positions
-                   {},                       // deopt data
-                   WasmCode::kWasmFunction,  // kind
-                   ExecutionTier::kNone,     // tier
-                   kNotForDebugging,         // for_debugging
-                   signature_hash,           // signature_hash
-                   {}}};                     // effect handlers
-  new_code->MaybePrint();
-  new_code->Validate();
+  std::unique_ptr<WasmCode> unique_code{
+      new (reserved_code) WasmCode{this,
+                                   kAnonymousFuncIndex,
+                                   dst_code_bytes,
+                                   static_cast<int>(result.frame_slot_count),
+                                   static_cast<int>(result.ool_spill_count),
+                                   result.tagged_parameter_slots,
+                                   safepoint_table_offset,
+                                   handler_table_offset,
+                                   constant_pool_offset,
+                                   code_comments_offset,
+                                   jump_table_info_offset,
+                                   instr_size,
+                                   result.trapping_instructions_data.as_span(),
+                                   reloc_info,
+                                   result.source_positions.as_span(),
+                                   result.inlining_positions.as_span(),
+                                   result.deopt_data.as_span(),
+                                   GetCodeKind(result),
+                                   result.result_tier,
+                                   result.for_debugging,
+                                   signature_hash,
+                                   result.effect_handlers.as_span(),
+                                   result.frame_has_feedback_slot}};
 
-  return PublishCodeLocked(std::move(new_code),
+  unique_code->MaybePrint();
+  unique_code->Validate();
+
+  // Test code is anonymous and does not participate in assumption tracking.
+  DCHECK_NULL(result.assumptions);
+  return PublishCodeLocked(std::move(unique_code),
                            UnpublishedWasmCode::kNoAssumptions);
 }
 
@@ -1323,7 +1346,7 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
     ExecutionTier tier, ForDebugging for_debugging,
     base::Vector<const uint8_t> effect_handlers, bool frame_has_feedback_slot,
     base::Vector<uint8_t> dst_code_bytes, const JumpTablesRef& jump_tables) {
-  base::Vector<uint8_t> reloc_info{
+  base::Vector<const uint8_t> reloc_info{
       desc.buffer + desc.buffer_size - desc.reloc_size,
       static_cast<size_t>(desc.reloc_size)};
 
@@ -1338,6 +1361,10 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
   const int jump_table_info_offset = desc.jump_table_info_offset;
   const int instr_size = desc.instr_size;
 
+  // Reserve memory for WasmCode. We need the pointer for the reloc info.
+  WasmCode* reserved_code =
+      static_cast<WasmCode*>(operator new(sizeof(WasmCode)));
+
   {
     WritableJitAllocation jit_allocation = ThreadIsolation::LookupJitAllocation(
         reinterpret_cast<Address>(dst_code_bytes.begin()),
@@ -1345,40 +1372,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
         true);
     jit_allocation.CopyCode(0, desc.buffer, desc.instr_size);
 
-    // Apply the relocation delta by iterating over the RelocInfo.
-    intptr_t delta = dst_code_bytes.begin() - desc.buffer;
-    int mode_mask =
-        RelocInfo::kApplyMask | RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
-        RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL) |
-        RelocInfo::ModeMask(RelocInfo::WASM_CODE_POINTER_TABLE_ENTRY);
-    Address code_start = reinterpret_cast<Address>(dst_code_bytes.begin());
-    Address constant_pool_start = code_start + constant_pool_offset;
-
-    for (WritableRelocIterator it(jit_allocation, dst_code_bytes, reloc_info,
-                                  constant_pool_start, mode_mask);
-         !it.done(); it.next()) {
-      RelocInfo::Mode mode = it.rinfo()->rmode();
-      if (RelocInfo::IsWasmCall(mode)) {
-        uint32_t call_tag = it.rinfo()->wasm_call_tag();
-        Address target = GetNearCallTargetForFunction(call_tag, jump_tables);
-        it.rinfo()->set_wasm_call_address(target);
-      } else if (RelocInfo::IsWasmStubCall(mode)) {
-        uint32_t stub_call_tag = it.rinfo()->wasm_call_tag();
-        DCHECK_LT(stub_call_tag,
-                  static_cast<uint32_t>(Builtin::kFirstBytecodeHandler));
-        Builtin builtin = static_cast<Builtin>(stub_call_tag);
-        Address entry = GetJumpTableEntryForBuiltin(builtin, jump_tables);
-        it.rinfo()->set_wasm_stub_call_address(entry);
-      } else if (RelocInfo::IsWasmCodePointerTableEntry(mode)) {
-        uint32_t function_index =
-            it.rinfo()->wasm_code_pointer_table_entry().value();
-        WasmCodePointer target = GetCodePointerHandle(function_index);
-        it.rinfo()->set_wasm_code_pointer_table_entry(target,
-                                                      SKIP_ICACHE_FLUSH);
-      } else {
-        it.rinfo()->apply(delta);
-      }
-    }
+    ApplyRelocations(jit_allocation, dst_code_bytes, reloc_info, desc,
+                     jump_tables, reserved_code);
   }
 
   // Flush the i-cache after relocation.
@@ -1391,34 +1386,35 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
   uint64_t signature_hash =
       module_->signature_hash(GetTypeCanonicalizer(), index);
 
-  std::unique_ptr<WasmCode> code{new WasmCode{this,
-                                              index,
-                                              dst_code_bytes,
-                                              stack_slots,
-                                              ool_spill_count,
-                                              tagged_parameter_slots,
-                                              safepoint_table_offset,
-                                              handler_table_offset,
-                                              constant_pool_offset,
-                                              code_comments_offset,
-                                              jump_table_info_offset,
-                                              instr_size,
-                                              trapping_instructions_data,
-                                              reloc_info,
-                                              source_position_table,
-                                              inlining_positions,
-                                              deopt_data,
-                                              kind,
-                                              tier,
-                                              for_debugging,
-                                              signature_hash,
-                                              effect_handlers,
-                                              frame_has_feedback_slot}};
+  std::unique_ptr<WasmCode> unique_code{new (reserved_code)
+                                            WasmCode{this,
+                                                     index,
+                                                     dst_code_bytes,
+                                                     stack_slots,
+                                                     ool_spill_count,
+                                                     tagged_parameter_slots,
+                                                     safepoint_table_offset,
+                                                     handler_table_offset,
+                                                     constant_pool_offset,
+                                                     code_comments_offset,
+                                                     jump_table_info_offset,
+                                                     instr_size,
+                                                     trapping_instructions_data,
+                                                     reloc_info,
+                                                     source_position_table,
+                                                     inlining_positions,
+                                                     deopt_data,
+                                                     kind,
+                                                     tier,
+                                                     for_debugging,
+                                                     signature_hash,
+                                                     effect_handlers,
+                                                     frame_has_feedback_slot}};
 
-  code->MaybePrint();
-  code->Validate();
+  unique_code->MaybePrint();
+  unique_code->Validate();
 
-  return code;
+  return unique_code;
 }
 
 WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
@@ -1426,7 +1422,8 @@ WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
               "wasm.PublishCode");
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   return PublishCodeLocked(std::move(unpublished_code.code),
-                           unpublished_code.assumptions.get());
+                           unpublished_code.assumptions.get(),
+                           unpublished_code.for_deopt);
 }
 
 std::vector<WasmCode*> NativeModule::PublishCode(
@@ -1439,7 +1436,8 @@ std::vector<WasmCode*> NativeModule::PublishCode(
   // The published code is put into the top-most surrounding {WasmCodeRefScope}.
   for (auto& unpublished_code : unpublished_codes) {
     WasmCode* code = PublishCodeLocked(std::move(unpublished_code.code),
-                                       unpublished_code.assumptions.get());
+                                       unpublished_code.assumptions.get(),
+                                       unpublished_code.for_deopt);
     if (code == nullptr) {
       // There were invalid assumptions in the code.
       DCHECK_NOT_NULL(unpublished_code.assumptions);
@@ -1458,7 +1456,7 @@ void NativeModule::UpdateWellKnownImports(
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   WellKnownImportsList::UpdateResult result =
       module_->type_feedback.well_known_imports.Update(entries);
-  if (result == WellKnownImportsList::UpdateResult::kFoundIncompatibility) {
+  if (result == WellKnownImportsList::kFoundIncompatibility) {
     RemoveCompiledCode(NativeModule::RemoveFilter::kRemoveTurbofanCode);
   }
 }
@@ -1481,7 +1479,8 @@ WasmCode::Kind GetCodeKind(const WasmCompilationResult& result) {
 }
 
 WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> owned_code,
-                                          AssumptionsJournal* assumptions) {
+                                          AssumptionsJournal* assumptions,
+                                          bool for_deopt) {
   allocation_mutex_.AssertHeld();
   DCHECK_LT(owned_code->index(), num_functions());
 
@@ -1503,6 +1502,12 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> owned_code,
   }
 
   WasmCode* code = owned_code.get();
+  // Establish a release-acquire relationship with find_wasmfx_handler_stack.
+  // Although hardware synchronization is guaranteed transitively via the
+  // instruction cache flushing barriers (or x64 TSO) when publishing JIT code,
+  // C++ compilers and TSan do not understand this JIT-to-C++ data flow and
+  // report a false positive data race.
+  TSAN_RELEASE(code);
   new_owned_code_.emplace_back(std::move(owned_code));
   DCHECK_NULL(owned_code);
 
@@ -1532,7 +1537,7 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> owned_code,
       kForDebugging > kNotForDebugging && kWithBreakpoints > kForDebugging,
       "for_debugging is ordered");
 
-  if (should_update_code_table(code, prior_code)) {
+  if (should_update_code_table(code, prior_code, for_deopt)) {
     code_table_[slot_idx] = code;
     if (prior_code) {
       // Code in the code table is always live, so `AddRef` can be used instead
@@ -1556,7 +1561,9 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> owned_code,
 }
 
 bool NativeModule::should_update_code_table(WasmCode* new_code,
-                                            WasmCode* prior_code) const {
+                                            WasmCode* prior_code,
+                                            bool for_deopt) const {
+  DCHECK_IMPLIES(for_deopt, v8_flags.wasm_deopt && new_code->is_liftoff());
   if (new_code->for_debugging() == kForStepping) {
     // Never install stepping code.
     return false;
@@ -1573,14 +1580,10 @@ bool NativeModule::should_update_code_table(WasmCode* new_code,
   }
   // In kNoDebugging:
   // Install if the tier is higher than before or we replace debugging code with
-  // non-debugging code.
-  // Also allow installing a lower tier if deopt support is enabled and the
-  // prior code has deopt data. (The check for deopt_data is needed as with
-  // compilation hints, both baseline and top tier compilation run concurrently
-  // in the background and can finish in any order.)
+  // non-debugging code. Also allow installing a lower tier if we are
+  // deopting.
   if (prior_code && !prior_code->for_debugging() &&
-      prior_code->tier() > new_code->tier() &&
-      (!v8_flags.wasm_deopt || prior_code->deopt_data().empty())) {
+      prior_code->tier() > new_code->tier() && !for_deopt) {
     return false;
   }
   return true;
@@ -1711,12 +1714,15 @@ bool NativeModule::HasCodeWithTier(uint32_t index, ExecutionTier tier) const {
          code_table_[declared_function_index(module(), index)]->tier() == tier;
 }
 
-void NativeModule::SetWasmSourceMap(
+void NativeModule::SetWasmSourceMapIfUnset(
     std::unique_ptr<WasmModuleSourceMap> source_map) {
+  base::RecursiveMutexGuard guard(&allocation_mutex_);
+  if (source_map_) return;
   source_map_ = std::move(source_map);
 }
 
 WasmModuleSourceMap* NativeModule::GetWasmSourceMap() const {
+  base::RecursiveMutexGuard guard(&allocation_mutex_);
   return source_map_.get();
 }
 
@@ -1738,6 +1744,7 @@ ThreadIsolation::JitAllocationType ToAllocationType(
     case NativeModule::JumpTableType::kLazyCompileTable:
       return ThreadIsolation::JitAllocationType::kWasmLazyCompileTable;
   }
+  UNREACHABLE();
 }
 
 }  // namespace
@@ -1951,28 +1958,26 @@ namespace {
 class NativeModuleWireBytesStorage final : public WireBytesStorage {
  public:
   explicit NativeModuleWireBytesStorage(
-      std::shared_ptr<base::OwnedVector<const uint8_t>> wire_bytes)
+      std::shared_ptr<base::UniqueArray<const uint8_t>> wire_bytes)
       : wire_bytes_(std::move(wire_bytes)) {}
 
   base::Vector<const uint8_t> GetCode(WireBytesRef ref) const final {
-    return std::atomic_load(&wire_bytes_)
-        ->as_vector()
-        .SubVector(ref.offset(), ref.end_offset());
+    return std::atomic_load(&wire_bytes_)->subspan(ref.offset(), ref.length());
   }
 
   std::optional<ModuleWireBytes> GetModuleBytes() const final {
     return std::optional<ModuleWireBytes>(
-        std::atomic_load(&wire_bytes_)->as_vector());
+        std::atomic_load(&wire_bytes_)->as_span());
   }
 
  private:
-  const std::shared_ptr<base::OwnedVector<const uint8_t>> wire_bytes_;
+  const std::shared_ptr<base::UniqueArray<const uint8_t>> wire_bytes_;
 };
 }  // namespace
 
-void NativeModule::SetWireBytes(base::OwnedVector<const uint8_t> wire_bytes) {
+void NativeModule::SetWireBytes(base::UniqueArray<const uint8_t> wire_bytes) {
   auto shared_wire_bytes =
-      std::make_shared<base::OwnedVector<const uint8_t>>(std::move(wire_bytes));
+      std::make_shared<base::UniqueArray<const uint8_t>>(std::move(wire_bytes));
   std::atomic_store(&wire_bytes_, shared_wire_bytes);
   if (!shared_wire_bytes->empty()) {
     compilation_state_->SetWireBytesStorage(
@@ -2137,6 +2142,14 @@ WasmCodePointer NativeModule::GetCodePointerHandle(int index) const {
 
 NativeModule::~NativeModule() {
   TRACE_HEAP("Deleting native module: %p\n", this);
+
+  // Ensure that {code_allocator_} is declared after {owned_code_} so that C++
+  // destroys {code_allocator_} (and removes the memory ranges from
+  // {WasmCodeManager::lookup_map_}) BEFORE {owned_code_} is destroyed.
+  static_assert(offsetof(NativeModule, code_allocator_) >
+                    offsetof(NativeModule, owned_code_),
+                "code_allocator_ must be declared after owned_code_");
+
   // Cancel all background compilation before resetting any field of the
   // NativeModule or freeing anything.
   compilation_state_->CancelCompilation();
@@ -2153,7 +2166,7 @@ NativeModule::~NativeModule() {
   GetWasmEngine()->FreeNativeModule(this);
 
   // If experimental PGO support is enabled, serialize the PGO data now.
-  if (V8_UNLIKELY(v8_flags.experimental_wasm_pgo_to_file)) {
+  if (V8_UNLIKELY(v8_flags.wasm_pgo_to_file)) {
     DumpProfileToFile(module_.get(), wire_bytes(), tiering_budgets_.get());
   }
 
@@ -2198,8 +2211,8 @@ WasmCodeManager::WasmCodeManager()
 {
   // Check that --wasm-max-code-space-size-mb is not set bigger than the default
   // value. Otherwise we run into DCHECKs or other crashes later.
-  CHECK_GE(kDefaultMaxWasmCodeSpaceSizeMb,
-           v8_flags.wasm_max_code_space_size_mb);
+  CHECK_NO_SECURITY_IMPACT(kDefaultMaxWasmCodeSpaceSizeMb >=
+                           v8_flags.wasm_max_code_space_size_mb);
 }
 
 WasmCodeManager::~WasmCodeManager() {
@@ -2241,10 +2254,8 @@ void WasmCodeManager::Commit(base::AddressRegion region) {
   TRACE_HEAP("Setting rwx permissions for 0x%" PRIxPTR ":0x%" PRIxPTR "\n",
              region.begin(), region.end());
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT && defined(V8_OS_IOS)
-  // iOS drops execute from a RWX request, so asking for RWX here produced
-  // writable-but-not-executable wasm code and every call into it faulted on
-  // instruction fetch. Commit read-execute instead; writes reach these pages
-  // through the RW mirror registered in TryAllocate.
+  // iOS викидає execute з RWX, тому комітимо RX, а пишем через RW дзеркало з
+  // TryAllocate.
   bool success = GetPageAllocator()->RecommitPages(
       reinterpret_cast<void*>(region.begin()), region.size(),
       PageAllocator::kReadExecute);
@@ -2333,12 +2344,8 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size) {
   }
 
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT && defined(V8_OS_IOS)
-  // Give this code space its own RW mirror. Wasm allocates outside the heap's
-  // code range, so the range registered by CodeRange does not cover it and
-  // writes here would otherwise land on pages that Commit() now makes RX.
-  // Leaving the space non-executable when no mirror can be established is the
-  // safe outcome: wasm then faults on entry and the JIT tier guard demotes,
-  // which beats running code from pages nothing can write.
+  // Wasm виділяє пам'ять поза code range, тому окреме RW дзеркало. Якщо його
+  // нема, простір лишається без execute і tier guard знижує JIT.
   if (IOSCodeRangeWriteProtect::RegisterWasmCodeRange(mem.address(),
                                                       mem.size())) {
     page_allocator->DiscardSystemPages(reinterpret_cast<void*>(mem.address()),
@@ -2461,8 +2468,8 @@ size_t WasmCodeManager::EstimateNativeModuleCodeSize(
   // The size for the jump table and far jump table is added later, per code
   // space (see {OverheadPerCodeSpace}). We still need to add the overhead for
   // the lazy compile table once, though. There are configurations where we do
-  // not need it (non-asm.js, no dynamic tiering and no lazy compilation), but
-  // we ignore this here as most of the time we will need it.
+  // not need it (no dynamic tiering and no lazy compilation), but we ignore
+  // this here as most of the time we will need it.
   const size_t lazy_compile_table_size =
       JumpTableAssembler::SizeForNumberOfLazyFunctions(num_functions);
 
@@ -2473,8 +2480,6 @@ size_t WasmCodeManager::EstimateNativeModuleCodeSize(
 
   const size_t overhead_per_function_liftoff =
       kLiftoffFunctionOverhead + kCodeAlignment / 2;
-  // Note: For asm.js we do not have Liftoff support, but this corner case is
-  // being ignored here.
   size_t size_of_liftoff =
       v8_flags.liftoff ? overhead_per_function_liftoff * num_functions +
                              kLiftoffCodeSizeMultiplier * code_section_length
@@ -2546,7 +2551,7 @@ Isolate* GetCurrentIsolateForGc() {
   if (Isolate* isolate = Isolate::TryGetCurrent()) {
     // Note: instead of failing, this CHECK could also crash if `isolate` was
     // deallocated in the meantime (and hence is *not* the current isolate).
-    CHECK_EQ(isolate->thread_id(), ThreadId::Current());
+    CHECK_EQ(isolate->thread_id(), base::ThreadId::Current());
     return isolate;
   }
   return nullptr;
@@ -2605,11 +2610,14 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
 
   // The '--wasm-max-initial-code-space-reservation' testing flag can be used to
   // reduce the maximum size of the initial code space reservation (in MB).
-  if (v8_flags.wasm_max_initial_code_space_reservation > 0) {
+  if (v8_flags.wasm_max_initial_code_space_reservation > 0 &&
+      static_cast<size_t>(v8_flags.wasm_max_initial_code_space_reservation) <=
+          code_vmem_size / MB) {
     size_t flag_max_bytes =
         static_cast<size_t>(v8_flags.wasm_max_initial_code_space_reservation) *
         MB;
-    if (flag_max_bytes < code_vmem_size) code_vmem_size = flag_max_bytes;
+    size_t min_bytes = 2 * OverheadPerCodeSpace(module->num_declared_functions);
+    code_vmem_size = std::max(flag_max_bytes, min_bytes);
   }
 
   VirtualMemory code_space;
@@ -2691,10 +2699,9 @@ void NativeModule::SampleCodeSize(Counters* counters) const {
     metadata_histogram->AddSample(metadata_size_kb);
   }
   // If this is a wasm module of >= 2MB, also sample the freed code size,
-  // absolute and relative. Code GC does not happen on asm.js
-  // modules, and small modules will never trigger GC anyway.
+  // absolute and relative. Small modules are unlikely to trigger GC anyway.
   size_t generated_size = code_allocator_.generated_code_size();
-  if (generated_size >= 2 * MB && module()->origin == kWasmOrigin) {
+  if (generated_size >= 2 * MB) {
     size_t freed_size = code_allocator_.freed_code_size();
     DCHECK_LE(freed_size, generated_size);
     int freed_percent = static_cast<int>(100 * freed_size / generated_size);
@@ -2797,12 +2804,11 @@ std::vector<UnpublishedWasmCode> NativeModule::AddCompiledCode(
         AddCodeWithCodeSpace(
             result.func_index, result.code_desc, result.frame_slot_count,
             result.ool_spill_count, result.tagged_parameter_slots,
-            result.trapping_instructions_data.as_vector(),
-            result.source_positions.as_vector(),
-            result.inlining_positions.as_vector(),
-            result.deopt_data.as_vector(), GetCodeKind(result),
-            result.result_tier, result.for_debugging,
-            result.effect_handlers.as_vector(), result.frame_has_feedback_slot,
+            result.trapping_instructions_data.as_span(),
+            result.source_positions.as_span(),
+            result.inlining_positions.as_span(), result.deopt_data.as_span(),
+            GetCodeKind(result), result.result_tier, result.for_debugging,
+            result.effect_handlers.as_span(), result.frame_has_feedback_slot,
             this_code_space, jump_tables),
         std::move(result.assumptions));
   }
@@ -2816,9 +2822,6 @@ std::vector<UnpublishedWasmCode> NativeModule::AddCompiledCode(
 }
 
 void NativeModule::SetDebugState(DebugState new_debug_state) {
-  // Do not tier down asm.js (just never change the tiering state).
-  if (module()->origin != kWasmOrigin) return;
-
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   debug_state_ = new_debug_state;
 }
@@ -2933,16 +2936,17 @@ NamesProvider* NativeModule::GetNamesProvider() {
 size_t NativeModule::EstimateCurrentMemoryConsumption() const {
   UPDATE_WHEN_CLASS_CHANGES(NativeModule, 528);
   size_t result = sizeof(NativeModule);
-  result += module_->EstimateCurrentMemoryConsumption();
 
-  std::shared_ptr<base::OwnedVector<const uint8_t>> wire_bytes =
+  std::shared_ptr<base::UniqueArray<const uint8_t>> wire_bytes =
       std::atomic_load(&wire_bytes_);
   size_t wire_bytes_size = wire_bytes ? wire_bytes->size() : 0;
-  result += wire_bytes_size;
-
-  if (source_map_) {
-    result += source_map_->EstimateCurrentMemoryConsumption();
+  // If wire bytes have not been set yet, a streaming decoder may still be
+  // mutating {module_}; wait until decoding finishes before reading it.
+  if (wire_bytes_size > 0) {
+    result += module_->EstimateCurrentMemoryConsumption();
+    result += wire_bytes_size;
   }
+
   result += compilation_state_->EstimateCurrentMemoryConsumption();
   // For {tiering_budgets_}.
   result += module_->num_declared_functions * sizeof(uint32_t);
@@ -2972,6 +2976,9 @@ size_t NativeModule::EstimateCurrentMemoryConsumption() const {
     result += module_->num_declared_functions * sizeof(void*);
     result += ContentSize(code_space_data_);
     debug_info = debug_info_.get();
+    if (source_map_) {
+      result += source_map_->EstimateCurrentMemoryConsumption();
+    }
     if (names_provider_) {
       result += names_provider_->EstimateCurrentMemoryConsumption();
     }
@@ -2980,10 +2987,13 @@ size_t NativeModule::EstimateCurrentMemoryConsumption() const {
   result += counter_updates_.EstimateCurrentMemoryConsumption() -
             sizeof(counter_updates_);
 
-  result += ContentSize(stack_entry_wrappers_);
-  for (const std::shared_ptr<WasmWrapperHandle>& wrapper :
-       stack_entry_wrappers_) {
-    result += wrapper->code()->EstimateCurrentMemoryConsumption();
+  {
+    base::MutexGuard lock(&stack_wrapper_mutex_);
+    result += ContentSize(stack_entry_wrappers_);
+    for (const std::shared_ptr<WasmWrapperHandle>& wrapper :
+         stack_entry_wrappers_) {
+      result += wrapper->code()->EstimateCurrentMemoryConsumption();
+    }
   }
 
   // We cannot hold the `allocation_mutex_` while calling
@@ -3025,8 +3035,7 @@ void WasmCodeManager::FreeNativeModule(
     lookup_map_.erase(code_space.address());
     ThreadIsolation::UnregisterJitPage(code_space.address(), code_space.size());
 #if V8_HEAP_USE_IOS_MPROTECT_JIT_WRITE_PROTECT && defined(V8_OS_IOS)
-    // Release the RW mirror before the reservation goes away, so the slot is
-    // reusable and the alias does not outlive what it aliases.
+    // Знімаєм дзеркало поки резерв ще живий, щоб alias не пережив оригінал.
     IOSCodeRangeWriteProtect::UnregisterWasmCodeRange(code_space.address());
 #endif
     code_space.Free();
@@ -3063,17 +3072,11 @@ WasmCode* WasmCodeManager::LookupCode(Address pc) const {
 }
 
 WasmCode* WasmCodeManager::LookupCode(Isolate* isolate, Address pc) const {
+  DCHECK_NOT_NULL(isolate);
   // Since kNullAddress is used as a sentinel value, we should not try
-  // to look it up in the cache
+  // to look it up in the cache.
   if (pc == kNullAddress) return nullptr;
-  // If 'isolate' is nullptr, do not use a cache. This can happen when
-  // called from function V8NameConverter::NameOfAddress
-  if (isolate) {
-    return isolate->wasm_code_look_up_cache()->GetCacheEntry(pc)->code;
-  } else {
-    wasm::WasmCodeRefScope code_ref_scope;
-    return LookupCode(pc);
-  }
+  return isolate->wasm_code_look_up_cache()->GetCacheEntry(pc)->code;
 }
 
 std::pair<WasmCode*, SafepointEntry&> WasmCodeManager::LookupCodeAndSafepoint(
