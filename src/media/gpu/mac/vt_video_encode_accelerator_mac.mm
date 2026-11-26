@@ -7,15 +7,23 @@
 #import <Foundation/Foundation.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <memory>
 #include <optional>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "base/apple/bridging.h"
 #include "base/apple/foundation_util.h"
 #include "base/apple/osstatus_logging.h"
 #include "base/containers/flat_map.h"
+#include "base/containers/span.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/mac/mac_util.h"
+#include "base/memory/ref_counted_delete_on_sequence.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "base/no_destructor.h"
@@ -23,10 +31,15 @@
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/task/bind_post_task.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "base/trace_event/trace_event.h"
 #include "base/types/expected.h"
 #include "build/build_config.h"
+#include "gpu/command_buffer/common/shared_image_usage.h"
+#include "gpu/command_buffer/service/shared_image/shared_image_manager.h"
+#include "gpu/command_buffer/service/shared_image/shared_image_representation.h"
 #include "media/base/bitrate.h"
 #include "media/base/bitstream_buffer.h"
 #include "media/base/encoder_status.h"
@@ -37,21 +50,43 @@
 #include "media/base/video_codecs.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
+#include "media/gpu/command_buffer_helper.h"
 #include "media/gpu/gpu_video_encode_accelerator_helpers.h"
+#include "media/gpu/mac/vt_hdr_metadata.h"
+#include "media/media_buildflags.h"
 #include "media/video/video_encode_accelerator.h"
+#include "ui/gfx/hdr_metadata_mac.h"
+#include "ui/gfx/mac/io_surface.h"
 
 using base::apple::CFToNSPtrCast;
+using base::apple::NSToCFOwnershipCast;
 using base::apple::NSToCFPtrCast;
-
-// This is a min version of macOS where we want to support SVC encoding via
-// EnableLowLatencyRateControl flag. The flag is actually supported since 11.3,
-// but there we see frame drops even with ample bitrate budget. Excessive frame
-// drops were fixed in 12.0.1.
-#define LOW_LATENCY_AND_SVC_AVAILABLE_VER 12.0.1
 
 #define SOFTWARE_ENCODING_SUPPORTED BUILDFLAG(IS_MAC)
 
 namespace media {
+
+struct SharedImageEncodeAccess
+    : public base::RefCountedDeleteOnSequence<SharedImageEncodeAccess> {
+  SharedImageEncodeAccess()
+      : base::RefCountedDeleteOnSequence<SharedImageEncodeAccess>(
+            base::SequencedTaskRunner::GetCurrentDefault()) {}
+
+  SharedImageEncodeAccess(const SharedImageEncodeAccess&) = delete;
+  SharedImageEncodeAccess& operator=(const SharedImageEncodeAccess&) = delete;
+
+  // Destroyed in reverse declaration order so scoped_access ends first and the
+  // helper-provided memory tracker outlives the representation.
+  scoped_refptr<CommandBufferHelper> command_buffer_helper;
+  std::unique_ptr<gpu::VideoImageRepresentation> representation;
+  std::unique_ptr<gpu::VideoImageRepresentation::ScopedReadAccess>
+      scoped_access;
+
+ private:
+  friend class base::RefCountedDeleteOnSequence<SharedImageEncodeAccess>;
+  friend class base::DeleteHelper<SharedImageEncodeAccess>;
+  ~SharedImageEncodeAccess() = default;
+};
 
 using EncoderType = VideoEncodeAccelerator::Config::EncoderType;
 
@@ -62,6 +97,46 @@ constexpr size_t kMaxFrameRateDenominator = 1;
 constexpr size_t kNumInputBuffers = 3;
 constexpr gfx::Size kDefaultSupportedResolution = gfx::Size(640, 480);
 constexpr int kH26xMaxQp = 51;
+
+// Configures a PQ session for HDR metadata. `hdr_metadata` is recorded on the
+// format description of every encoded sample, and asking for metadata insertion
+// additionally gets it into the bitstream on encoders that implement it.
+void ConfigureVtSessionForHdrMetadata(
+    video_toolbox::SessionPropertySetter& session_property_setter,
+    const gfx::HDRMetadata& hdr_metadata) {
+  if (session_property_setter.IsSupported(
+          kVTCompressionPropertyKey_MasteringDisplayColorVolume)) {
+    if (auto mdcv = gfx::GenerateMasteringDisplayColorVolume(
+            hdr_metadata, /*fallback_to_defaults=*/false)) {
+      if (!session_property_setter.Set(
+              kVTCompressionPropertyKey_MasteringDisplayColorVolume,
+              mdcv.get())) {
+        DLOG(ERROR) << "Failed to set MasteringDisplayColorVolume on "
+                       "VTCompressionSession.";
+      }
+    }
+  }
+
+  if (session_property_setter.IsSupported(
+          kVTCompressionPropertyKey_ContentLightLevelInfo)) {
+    if (auto clli = gfx::GenerateContentLightLevelInfo(hdr_metadata)) {
+      if (!session_property_setter.Set(
+              kVTCompressionPropertyKey_ContentLightLevelInfo, clli.get())) {
+        DLOG(ERROR) << "Failed to set ContentLightLevelInfo on "
+                       "VTCompressionSession.";
+      }
+    }
+  }
+
+  if (session_property_setter.IsSupported(
+          kVTCompressionPropertyKey_HDRMetadataInsertionMode) &&
+      !session_property_setter.Set(
+          kVTCompressionPropertyKey_HDRMetadataInsertionMode,
+          kVTHDRMetadataInsertionMode_Auto)) {
+    DLOG(ERROR) << "Failed to set HDRMetadataInsertionMode on "
+                   "VTCompressionSession.";
+  }
+}
 
 #if SOFTWARE_ENCODING_SUPPORTED
 // The IDs of the encoders that may be selected when we enable low latency via
@@ -74,6 +149,43 @@ constexpr std::string_view kRealtimeHardwareEncoderIDs[] = {
     "com.apple.videotoolbox.videoencoder.h264.rtvc",
     "com.apple.videotoolbox.videoencoder.hevc.rtvc",
 };
+
+// The hardware HEVC encoders on Intel Macs with a T2 chip: hevc.ave runs on
+// the T2 and hevc.gva on the Intel GPU.
+constexpr char kHevcT2EncoderID[] =
+    "com.apple.videotoolbox.videoencoder.hevc.ave";
+constexpr char kHevcIntelGpuEncoderID[] =
+    "com.apple.videotoolbox.videoencoder.hevc.gva";
+
+// Returns true if VideoToolbox lists both `kHevcT2EncoderID` and
+// `kHevcIntelGpuEncoderID`.
+bool HasT2AndIntelGpuHevcEncoders() {
+  static const bool kHasBoth = [] {
+    CFArrayRef encoder_list = nullptr;
+    if (VTCopyVideoEncoderList(/*options=*/nullptr, &encoder_list) != noErr ||
+        !encoder_list) {
+      return false;
+    }
+    NSArray* encoders = base::apple::CFToNSOwnershipCast(encoder_list);
+    bool has_t2_encoder = false;
+    bool has_gpu_encoder = false;
+    for (id encoder in encoders) {
+      NSDictionary* encoder_dict = base::apple::ObjCCast<NSDictionary>(encoder);
+      NSString* encoder_id = base::apple::ObjCCast<NSString>(
+          encoder_dict[CFToNSPtrCast(kVTVideoEncoderList_EncoderID)]);
+      if ([encoder_id isEqualToString:@(kHevcT2EncoderID)]) {
+        has_t2_encoder = true;
+      } else if ([encoder_id isEqualToString:@(kHevcIntelGpuEncoderID)]) {
+        has_gpu_encoder = true;
+      }
+      if (has_t2_encoder && has_gpu_encoder) {
+        return true;
+      }
+    }
+    return false;
+  }();
+  return kHasBoth;
+}
 #endif  // SOFTWARE_ENCODING_SUPPORTED
 
 base::span<const VideoCodecProfile> GetSupportedVideoCodecProfiles() {
@@ -87,6 +199,12 @@ base::span<const VideoCodecProfile> GetSupportedVideoCodecProfiles() {
 #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
         if (base::FeatureList::IsEnabled(kPlatformHEVCEncoderSupport)) {
           profiles.push_back(HEVCPROFILE_MAIN);
+          if (base::FeatureList::IsEnabled(kPlatformHEVCHbdEncoderSupport)) {
+            profiles.push_back(HEVCPROFILE_MAIN10);
+#if defined(ARCH_CPU_ARM_FAMILY)
+            profiles.push_back(HEVCPROFILE_REXT);
+#endif
+          }
         }
 #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
         return profiles;
@@ -154,10 +272,11 @@ gfx::Size GetMaxResolution(VideoCodec codec) {
   }
 }
 
-bool IsSVCSupported(VideoCodec codec) {
+bool IsSVCSupported(VideoCodecProfile profile) {
+  const VideoCodec codec = VideoCodecProfileToVideoCodec(profile);
 #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER) && defined(ARCH_CPU_ARM_FAMILY)
   // macOS 14.0+ support SVC HEVC encoding for Apple Silicon chips only.
-  if (codec == VideoCodec::kHEVC) {
+  if (profile == HEVCPROFILE_MAIN) {
     if (@available(macOS 14.0, iOS 17.0, *)) {
       return true;
     }
@@ -165,13 +284,13 @@ bool IsSVCSupported(VideoCodec codec) {
   }
 #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER) &&
         // defined(ARCH_CPU_ARM_FAMILY)
-  if (@available(macOS LOW_LATENCY_AND_SVC_AVAILABLE_VER, iOS 15.0, *)) {
+  if (@available(iOS 15.0, *)) {
     return codec == VideoCodec::kH264;
   }
   return false;
 }
 
-bool IsManualQpSupported(VideoCodec codec) {
+bool IsManualQpSupported(VideoCodecProfile profile) {
   // Querying `kVTCompressionPropertyKey_SupportsBaseFrameQP` is the
   // way Apple recommends to test whether per frame QP is supported by a
   // given encoder. Based on tests on Intel and Apple Silicon Macs,
@@ -180,10 +299,11 @@ bool IsManualQpSupported(VideoCodec codec) {
   // `kVTVideoEncoderSpecification_EnableLowLatencyRateControl` set to
   // `true`. Thus, we assume external mode is supported if SVC is
   // supported.
-  return IsSVCSupported(codec);
+  return IsSVCSupported(profile);
 }
 
-static CFStringRef VideoCodecProfileToVTProfile(VideoCodecProfile profile) {
+static CFStringRef VideoCodecProfileToVTProfile(VideoCodecProfile profile,
+                                                VideoPixelFormat input_format) {
   switch (profile) {
     case H264PROFILE_BASELINE:
       return kVTProfileLevel_H264_Baseline_AutoLevel;
@@ -194,10 +314,93 @@ static CFStringRef VideoCodecProfileToVTProfile(VideoCodecProfile profile) {
 #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
     case HEVCPROFILE_MAIN:
       return kVTProfileLevel_HEVC_Main_AutoLevel;
+    case HEVCPROFILE_MAIN10:
+      return kVTProfileLevel_HEVC_Main10_AutoLevel;
+    case HEVCPROFILE_REXT:
+      switch (input_format) {
+        case PIXEL_FORMAT_NV16:
+        case PIXEL_FORMAT_P210LE:
+          // 8bit 4:2:2 re-uses Main42210 profile level.
+          // Константа є з iOS 15.4
+          if (__builtin_available(iOS 15.4, *)) {
+            return kVTProfileLevel_HEVC_Main42210_AutoLevel;
+          }
+          NOTREACHED();
+        case PIXEL_FORMAT_NV24:
+          // Not in the public SDK headers, string matches the VT constant.
+          return CFSTR("HEVC_Main444_AutoLevel");
+        case PIXEL_FORMAT_P410LE:
+          return CFSTR("HEVC_Main44410_AutoLevel");
+        default:
+          NOTREACHED();
+      }
 #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
     default:
       NOTREACHED();
   }
+}
+
+constexpr auto kDefaultGpuInputFormats =
+    std::to_array<VideoPixelFormat>({PIXEL_FORMAT_NV12});
+
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+constexpr auto kHevcMain10InputFormats =
+    std::to_array<VideoPixelFormat>({PIXEL_FORMAT_P010LE});
+
+constexpr auto kHevcRextInputFormats = std::to_array<VideoPixelFormat>({
+    PIXEL_FORMAT_NV16,
+    PIXEL_FORMAT_NV24,
+    PIXEL_FORMAT_P210LE,
+    PIXEL_FORMAT_P410LE,
+});
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+
+base::span<const VideoPixelFormat> CandidateGpuInputFormatsForProfile(
+    VideoCodecProfile profile) {
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  if (profile == HEVCPROFILE_MAIN10) {
+    return kHevcMain10InputFormats;
+  }
+  if (profile == HEVCPROFILE_REXT) {
+    return kHevcRextInputFormats;
+  }
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  return kDefaultGpuInputFormats;
+}
+
+bool IsInputFormatSupportedForProfile(VideoCodecProfile profile,
+                                      VideoPixelFormat format) {
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  if (profile == HEVCPROFILE_MAIN10 || profile == HEVCPROFILE_REXT) {
+    return std::ranges::contains(CandidateGpuInputFormatsForProfile(profile),
+                                 format);
+  }
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  return format == PIXEL_FORMAT_I420 || format == PIXEL_FORMAT_NV12;
+}
+
+bool SetSessionProfileLevel(video_toolbox::SessionPropertySetter& setter,
+                            VideoCodecProfile profile,
+                            VideoPixelFormat input_format) {
+  if (!setter.Set(kVTCompressionPropertyKey_ProfileLevel,
+                  VideoCodecProfileToVTProfile(profile, input_format))) {
+    return false;
+  }
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  // 8-bit 4:2:2 uses Main42210, so bit depth must be set explicitly.
+  if (profile == HEVCPROFILE_REXT && input_format == PIXEL_FORMAT_NV16) {
+    // Ключ є з iOS 15.4
+    if (__builtin_available(iOS 15.4, *)) {
+      if (!setter.IsSupported(kVTCompressionPropertyKey_OutputBitDepth) ||
+          !setter.Set(kVTCompressionPropertyKey_OutputBitDepth, 8)) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  return true;
 }
 
 static CMVideoCodecType VideoCodecToCMVideoCodec(VideoCodec codec) {
@@ -245,13 +448,50 @@ bool IsHardwareEncoder(VTSessionRef compression_session) {
 #endif  // SOFTWARE_ENCODING_SUPPORTED
 }
 
+// Formats whose session attributes encode full vs limited range. NV12/I420
+// keep the historical empty hint; VideoToolbox assumes 8-bit 4:2:0.
+std::optional<OSType> CVPixelFormatForSourceImageBuffer(
+    VideoPixelFormat input_format,
+    gfx::ColorSpace::RangeID source_range) {
+  switch (input_format) {
+    case PIXEL_FORMAT_NV16:
+    case PIXEL_FORMAT_NV24:
+    case PIXEL_FORMAT_P010LE:
+    case PIXEL_FORMAT_P210LE:
+    case PIXEL_FORMAT_P410LE:
+      return CVPixelFormatForVideoFrame(input_format, source_range);
+    default:
+      return std::nullopt;
+  }
+}
+
+base::apple::ScopedCFTypeRef<CFDictionaryRef> CreateSourceImageBufferAttributes(
+    VideoPixelFormat input_format,
+    const gfx::Size& size,
+    gfx::ColorSpace::RangeID source_range = gfx::ColorSpace::RangeID::LIMITED) {
+  std::optional<OSType> pixel_format =
+      CVPixelFormatForSourceImageBuffer(input_format, source_range);
+  if (!pixel_format) {
+    return base::apple::ScopedCFTypeRef<CFDictionaryRef>();
+  }
+  NSDictionary* attrs = @{
+    CFToNSPtrCast(kCVPixelBufferPixelFormatTypeKey) : @(pixel_format.value()),
+    CFToNSPtrCast(kCVPixelBufferWidthKey) : @(size.width()),
+    CFToNSPtrCast(kCVPixelBufferHeightKey) : @(size.height()),
+  };
+  return base::apple::ScopedCFTypeRef<CFDictionaryRef>(
+      NSToCFOwnershipCast(attrs));
+}
+
 base::expected<video_toolbox::ScopedVTCompressionSessionRef, OSStatus>
-CreateCompressionSession(VideoCodec codec,
-                         const gfx::Size& input_size,
-                         EncoderType required_encoder_type,
-                         bool require_low_delay,
-                         VTCompressionOutputCallback output_callback = nullptr,
-                         VTVideoEncodeAccelerator* accelerator = nullptr) {
+CreateCompressionSession(
+    VideoCodecProfile profile,
+    const gfx::Size& input_size,
+    EncoderType required_encoder_type,
+    bool require_low_delay,
+    VTCompressionOutputCallback output_callback = nullptr,
+    VTVideoEncodeAccelerator* accelerator = nullptr,
+    CFDictionaryRef source_image_buffer_attributes = nullptr) {
   CHECK_EQ(!output_callback, !accelerator);
 
   NSMutableDictionary* encoder_spec = [NSMutableDictionary dictionary];
@@ -274,21 +514,27 @@ CreateCompressionSession(VideoCodec codec,
         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder)] =
         @NO;
   }
+
+  // On Intel Macs with a T2 chip, hevc.ave intermittently creates sessions
+  // that fail every encode with kVTPropertyNotSupportedErr, see
+  // crbug.com/580153607. Prefer the GPU encoder when both are present.
+  const bool prefer_gpu_hevc_encoder =
+      required_encoder_type != EncoderType::kSoftware &&
+      VideoCodecProfileToVideoCodec(profile) == VideoCodec::kHEVC &&
+      HasT2AndIntelGpuHevcEncoders();
+  if (prefer_gpu_hevc_encoder) {
+    encoder_spec[CFToNSPtrCast(kVTVideoEncoderSpecification_EncoderID)] =
+        @(kHevcIntelGpuEncoderID);
+  }
 #endif  // SOFTWARE_ENCODING_SUPPORTED
 
-  if (@available(macOS LOW_LATENCY_AND_SVC_AVAILABLE_VER, iOS 15.0, *)) {
-    // Don't enable low-latency rate control in SW mode as it doesn't seem to
-    // apply to the SW encoder. From
-    // https://developer.apple.com/videos/play/wwdc2021/10158/, "[...] the
-    // low-latency mode always uses a hardware-accelerated video encoder". In
-    // fact, trying to use
-    // `kVTVideoEncoderSpecification_EnableLowLatencyRateControl` with the SW
-    // encoder leads to an initialization error.
+  if (@available(iOS 15.0, *)) {
+    // У SW режимі low latency rate control не вмикаємо, SW енкодер
+    // з kVTVideoEncoderSpecification_EnableLowLatencyRateControl падає при
+    // ініціалізації
     if (required_encoder_type != EncoderType::kSoftware && require_low_delay &&
-        IsSVCSupported(codec)) {
-      // iOS-14 back-deploy: this key is iOS 14.5+ (weak -> NULL on iOS 14.0-14.4,
-      // and a nil NSDictionary key would throw). Skip low-latency rate control
-      // on those releases.
+        IsSVCSupported(profile)) {
+      // Ключ є з iOS 14.5, раніше NULL, а nil ключ в NSDictionary кидає виняток
       if (__builtin_available(iOS 14.5, macOS 11.0, *)) {
         encoder_spec[CFToNSPtrCast(
             kVTVideoEncoderSpecification_EnableLowLatencyRateControl)] = @YES;
@@ -306,21 +552,31 @@ CreateCompressionSession(VideoCodec codec,
   // before returning to the client. Therefore, when control returns to us, we
   // are guaranteed that the output callback will not execute again.
   video_toolbox::ScopedVTCompressionSessionRef session;
-  const OSStatus status = VTCompressionSessionCreate(
-      kCFAllocatorDefault, input_size.width(), input_size.height(),
-      VideoCodecToCMVideoCodec(codec), NSToCFPtrCast(encoder_spec),
-      /*sourceImageBufferAttributes=*/nullptr,
-      /*compressedDataAllocator=*/nullptr, output_callback,
-      reinterpret_cast<void*>(accelerator), session.InitializeInto());
+  auto create_session = [&] {
+    return VTCompressionSessionCreate(
+        kCFAllocatorDefault, input_size.width(), input_size.height(),
+        VideoCodecToCMVideoCodec(VideoCodecProfileToVideoCodec(profile)),
+        NSToCFPtrCast(encoder_spec), source_image_buffer_attributes,
+        /*compressedDataAllocator=*/nullptr, output_callback,
+        reinterpret_cast<void*>(accelerator), session.InitializeInto());
+  };
+  OSStatus status = create_session();
+#if SOFTWARE_ENCODING_SUPPORTED
+  if (status != noErr && prefer_gpu_hevc_encoder) {
+    DVLOG(1) << "Failed to create a " << kHevcIntelGpuEncoderID << " session ("
+             << status << "), retrying without EncoderID";
+    [encoder_spec
+        removeObjectForKey:CFToNSPtrCast(
+                               kVTVideoEncoderSpecification_EncoderID)];
+    session.reset();
+    status = create_session();
+  }
+#endif  // SOFTWARE_ENCODING_SUPPORTED
   if (status != noErr) {
     if (@available(macOS 13, iOS 16, *)) {
-      // No extra steps required.
     } else {
-      // IMPORTANT: ScopedCFTypeRef::release() doesn't call CFRelease(). In
-      // case of an error VTCompressionSessionCreate() is not supposed to write
-      // a non-null value into compression_session_, but just in case, we'll
-      // clear it without calling CFRelease() because it can be unsafe to call
-      // VTCompressionSessionInvalidate() on a not fully created session.
+      // release() не кличе CFRelease(). Недобудовану сесію інвалідувати
+      // небезпечно, просто відпускаємо
       std::ignore = session.release();
     }
     return base::unexpected(status);
@@ -330,16 +586,65 @@ CreateCompressionSession(VideoCodec codec,
   return session;
 }
 
-bool CanCreateHardwareCompressionSession(VideoCodec codec) {
-  const bool can_create_hardware_session =
-      CreateCompressionSession(codec, kDefaultSupportedResolution,
-                               EncoderType::kHardware,
-                               /*require_low_delay=*/false)
-          .has_value();
+bool CanCreateHardwareCompressionSession(VideoCodecProfile profile,
+                                         VideoPixelFormat input_format) {
+  auto session = CreateCompressionSession(
+      profile, kDefaultSupportedResolution, EncoderType::kHardware,
+      /*require_low_delay=*/false, /*output_callback=*/nullptr,
+      /*accelerator=*/nullptr,
+      CreateSourceImageBufferAttributes(input_format,
+                                        kDefaultSupportedResolution)
+          .get());
+  bool can_create_hardware_session = session.has_value();
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  if (can_create_hardware_session &&
+      (profile == HEVCPROFILE_MAIN10 || profile == HEVCPROFILE_REXT)) {
+    video_toolbox::SessionPropertySetter setter(session.value());
+    can_create_hardware_session =
+        SetSessionProfileLevel(setter, profile, input_format);
+  }
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
   DVLOG_IF(1, !can_create_hardware_session)
-      << "Hardware " << GetCodecName(codec)
+      << "Hardware " << GetProfileName(profile) << " "
+      << VideoPixelFormatToString(input_format)
       << " encode acceleration is not available on this platform.";
   return can_create_hardware_session;
+}
+
+// Returns the profile to probe when checking hardware encode for `profile`.
+// H.264 baseline/main/high share the same codec type and session parameters, so
+// one probe covers all of them. Other profiles probe as themselves; RExt
+// combos are further distinguished by input format at the call site.
+VideoCodecProfile HardwareEncodeProbeProfile(VideoCodecProfile profile) {
+  switch (profile) {
+    case H264PROFILE_BASELINE:
+    case H264PROFILE_MAIN:
+    case H264PROFILE_HIGH:
+      return H264PROFILE_BASELINE;
+    default:
+      return profile;
+  }
+}
+
+std::vector<VideoPixelFormat> GpuSupportedPixelFormatsForProfile(
+    VideoCodecProfile profile,
+    VideoPixelFormat input_format = PIXEL_FORMAT_UNKNOWN) {
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  if (profile == HEVCPROFILE_MAIN10) {
+    return {PIXEL_FORMAT_P010LE};
+  }
+  if (profile == HEVCPROFILE_REXT) {
+    DCHECK(std::ranges::contains(kHevcRextInputFormats, input_format));
+    return {input_format};
+  }
+#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  if (base::FeatureList::IsEnabled(
+          kVTVideoEncodeAcceleratorOpaqueSharedImageEncode) &&
+      base::FeatureList::IsEnabled(
+          kVTVideoEncodeAcceleratorOpaqueRgbSharedImageEncode)) {
+    return {PIXEL_FORMAT_NV12, PIXEL_FORMAT_ARGB, PIXEL_FORMAT_XRGB};
+  }
+  return {PIXEL_FORMAT_NV12};
 }
 
 VideoEncoderInfo GetVideoEncoderInfo(
@@ -405,6 +710,7 @@ VideoEncoderInfo GetVideoEncoderInfo(
   }
   if (config.HasSpatialLayer() || config.HasTemporalLayer()) {
     CHECK(!config.spatial_layers.empty());
+    CHECK_LE(config.spatial_layers.size(), VideoEncoderInfo::kMaxSpatialLayers);
     for (size_t i = 0; i < config.spatial_layers.size(); ++i) {
       // Only L1T1, L1T2 are supported.
       CHECK_LE(config.spatial_layers[i].num_of_temporal_layers, 2);
@@ -417,19 +723,151 @@ VideoEncoderInfo GetVideoEncoderInfo(
   }
   CHECK(info.reports_average_qp);
 
+  if (base::FeatureList::IsEnabled(
+          kVTVideoEncodeAcceleratorOpaqueSharedImageEncode)) {
+    info.gpu_supported_pixel_formats = GpuSupportedPixelFormatsForProfile(
+        config.output_profile, config.input_format);
+    info.supports_gpu_shared_images = true;
+  }
+
   return info;
+}
+
+using PixelBufferResolvedCB =
+    base::OnceCallback<void(base::apple::ScopedCFTypeRef<CVPixelBufferRef>,
+                            scoped_refptr<SharedImageEncodeAccess>,
+                            EncoderStatus)>;
+
+using CommandBufferHelperResolvedCB =
+    base::OnceCallback<void(scoped_refptr<CommandBufferHelper>)>;
+
+// Called after the acquire sync token is released.
+void CreatePixelBufferFromSharedImage(scoped_refptr<CommandBufferHelper> helper,
+                                      scoped_refptr<VideoFrame> frame,
+                                      PixelBufferResolvedCB done_cb) {
+  TRACE_EVENT0("media",
+               "VTVideoEncodeAccelerator::CreatePixelBufferFromSharedImage");
+  DCHECK(helper);
+  DCHECK(frame);
+
+  gpu::SharedImageManager* shared_image_manager =
+      helper->GetSharedImageManager();
+  if (!shared_image_manager) {
+    std::move(done_cb).Run(base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                           nullptr,
+                           {EncoderStatus::Codes::kEncoderFailedEncode,
+                            "SharedImageManager is not available"});
+    return;
+  }
+
+  auto access = base::MakeRefCounted<SharedImageEncodeAccess>();
+  access->command_buffer_helper = helper;
+  access->representation = shared_image_manager->ProduceVideo(
+      /*device=*/nullptr, frame->shared_image()->mailbox(),
+      helper->GetMemoryTypeTracker());
+  if (!access->representation) {
+    std::move(done_cb).Run(base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                           nullptr,
+                           {EncoderStatus::Codes::kEncoderFailedEncode,
+                            "ProduceVideo failed for SharedImage"});
+    return;
+  }
+
+  if (access->representation->size() != frame->coded_size()) {
+    std::move(done_cb).Run(base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                           nullptr,
+                           {EncoderStatus::Codes::kEncoderFailedEncode,
+                            "SharedImage size mismatch"});
+    return;
+  }
+
+  access->scoped_access = access->representation->BeginScopedReadAccess();
+  if (!access->scoped_access) {
+    std::move(done_cb).Run(base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                           nullptr,
+                           {EncoderStatus::Codes::kEncoderFailedEncode,
+                            "BeginScopedReadAccess failed for SharedImage"});
+    return;
+  }
+
+  gfx::ScopedIOSurface io_surface = access->scoped_access->GetIOSurface();
+  if (!io_surface) {
+    std::move(done_cb).Run(base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                           nullptr,
+                           {EncoderStatus::Codes::kEncoderFailedEncode,
+                            "SharedImage is not IOSurface-backed"});
+    return;
+  }
+
+  auto pixel_buffer = WrapIOSurfaceInCVPixelBuffer(*frame, io_surface.get());
+  if (!pixel_buffer) {
+    std::move(done_cb).Run(base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                           nullptr,
+                           {EncoderStatus::Codes::kEncoderFailedEncode,
+                            "WrapIOSurfaceInCVPixelBuffer failed"});
+    return;
+  }
+
+  std::move(done_cb).Run(std::move(pixel_buffer), std::move(access),
+                         EncoderStatus::Codes::kOk);
+}
+
+// Waits for |frame|'s acquire sync token, then creates a CVPixelBuffer.
+void ResolveSharedImageOnGpuThread(scoped_refptr<CommandBufferHelper> helper,
+                                   scoped_refptr<VideoFrame> frame,
+                                   PixelBufferResolvedCB done_cb,
+                                   base::ScopedClosureRunner done_guard) {
+  DCHECK(helper);
+  DCHECK(frame);
+  DCHECK(frame->HasSharedImage());
+
+  std::vector<gpu::SyncToken> sync_tokens =
+      frame->shared_image()->GetSyncTokensForVideoFrame(
+          frame->acquire_sync_token());
+  helper->WaitForSyncTokens(
+      std::move(sync_tokens),
+      base::BindOnce(
+          [](scoped_refptr<CommandBufferHelper> helper,
+             scoped_refptr<VideoFrame> frame, PixelBufferResolvedCB callback,
+             base::ScopedClosureRunner callback_guard) {
+            callback_guard.ReplaceClosure(base::OnceClosure());
+            CreatePixelBufferFromSharedImage(
+                std::move(helper), std::move(frame), std::move(callback));
+          },
+          helper, std::move(frame), std::move(done_cb), std::move(done_guard)));
 }
 
 }  // namespace
 
+struct VTVideoEncodeAccelerator::PendingEncode {
+  PendingEncode(scoped_refptr<VideoFrame> frame,
+                const VideoEncoder::EncodeOptions& options)
+      : frame(std::move(frame)), options(options) {}
+  PendingEncode(PendingEncode&&) = default;
+  PendingEncode& operator=(PendingEncode&&) = default;
+  PendingEncode(const PendingEncode&) = delete;
+  PendingEncode& operator=(const PendingEncode&) = delete;
+  ~PendingEncode() = default;
+
+  scoped_refptr<VideoFrame> frame;
+  VideoEncoder::EncodeOptions options;
+  bool resolve_requested = false;
+};
+
 struct VTVideoEncodeAccelerator::InProgressFrameEncode {
-  InProgressFrameEncode(scoped_refptr<VideoFrame> frame,
-                        const gfx::ColorSpace& frame_cs,
-                        std::optional<int> frame_qp)
-      : frame(frame), encoded_color_space(frame_cs), qp(frame_qp) {}
+  InProgressFrameEncode(
+      scoped_refptr<VideoFrame> frame,
+      const gfx::ColorSpace& frame_cs,
+      std::optional<int> frame_qp,
+      scoped_refptr<SharedImageEncodeAccess> shared_image_access = nullptr)
+      : frame(std::move(frame)),
+        encoded_color_space(frame_cs),
+        qp(frame_qp),
+        shared_image_access(std::move(shared_image_access)) {}
   const scoped_refptr<VideoFrame> frame;
   const gfx::ColorSpace encoded_color_space;
   const std::optional<int> qp;
+  scoped_refptr<SharedImageEncodeAccess> shared_image_access;
 };
 
 struct VTVideoEncodeAccelerator::EncodeOutput {
@@ -505,61 +943,99 @@ VTVideoEncodeAccelerator::GetSupportedProfiles() {
       SVCScalabilityMode::kL1T1};
 
   // A cache for CanCreateHardwareCompressionSession() results, which can be
-  // costly to compute.
-  base::flat_map<VideoCodec, bool> can_create_hardware_session;
+  // costly to compute. Keyed by (probe profile, format) so H.264
+  // baseline/main/high share one NV12 probe, while HEVC Main10 and each RExt
+  // combo stay distinct. The factory already caches the full SupportedProfiles
+  // list per GPU process.
+  base::flat_map<std::pair<VideoCodecProfile, VideoPixelFormat>, bool>
+      can_create_hardware_session;
+  auto can_create_hardware = [&](VideoCodecProfile profile,
+                                 VideoPixelFormat input_format) {
+    const auto key =
+        std::make_pair(HardwareEncodeProbeProfile(profile), input_format);
+    if (can_create_hardware_session.find(key) ==
+        can_create_hardware_session.end()) {
+      can_create_hardware_session[key] =
+          CanCreateHardwareCompressionSession(key.first, input_format);
+    }
+    return can_create_hardware_session[key];
+  };
 
   for (const VideoCodecProfile profile : GetSupportedVideoCodecProfiles()) {
     const VideoCodec codec = VideoCodecProfileToVideoCodec(profile);
-
-    if (can_create_hardware_session.count(codec) == 0u) {
-      can_create_hardware_session[codec] =
-          CanCreateHardwareCompressionSession(codec);
-    }
+    const bool is_rext = profile == HEVCPROFILE_REXT;
 
     supported_profile.profile = profile;
     supported_profile.max_resolution = GetMaxResolution(codec);
 
-    for (const auto& min_resolution : GetMinResolutions(codec)) {
-      supported_profile.min_resolution = min_resolution;
-      supported_profile.is_software_codec = false;
-      supported_profile.scalability_modes = always_supported_scalability_modes;
-      supported_profile.rate_control_modes =
-          always_supported_rate_control_modes;
-      if (IsSVCSupported(codec)) {
-        supported_profile.scalability_modes.push_back(
-            SVCScalabilityMode::kL1T2);
+    for (const VideoPixelFormat input_format :
+         CandidateGpuInputFormatsForProfile(profile)) {
+      if (is_rext) {
+        supported_profile.chroma_sampling =
+            VideoPixelFormatToChromaSampling(input_format);
+        supported_profile.bit_depth =
+            base::checked_cast<uint8_t>(BitDepth(input_format));
+      } else {
+        supported_profile.chroma_sampling.reset();
+        supported_profile.bit_depth.reset();
       }
-      if (IsManualQpSupported(codec)) {
-        supported_profile.rate_control_modes |=
-            VideoEncodeAccelerator::kExternalMode;
-      }
-      if (can_create_hardware_session[codec]) {
+
+      for (const auto& min_resolution : GetMinResolutions(codec)) {
+        supported_profile.min_resolution = min_resolution;
+        supported_profile.is_software_codec = false;
+        supported_profile.scalability_modes =
+            always_supported_scalability_modes;
+        supported_profile.rate_control_modes =
+            always_supported_rate_control_modes;
+        if (IsSVCSupported(profile)) {
+          supported_profile.scalability_modes.push_back(
+              SVCScalabilityMode::kL1T2);
+        }
+        if (IsManualQpSupported(profile)) {
+          supported_profile.rate_control_modes |=
+              VideoEncodeAccelerator::kExternalMode;
+        }
+        if (base::FeatureList::IsEnabled(
+                kVTVideoEncodeAcceleratorOpaqueSharedImageEncode)) {
+          supported_profile.gpu_supported_pixel_formats =
+              GpuSupportedPixelFormatsForProfile(profile, input_format);
+          supported_profile.supports_gpu_shared_images = true;
+        }
+        if (can_create_hardware(profile, input_format)) {
+          supported_profiles.push_back(supported_profile);
+
+          SupportedProfile portrait_profile(supported_profile);
+          portrait_profile.max_resolution.Transpose();
+          supported_profiles.push_back(portrait_profile);
+        }
+
+#if SOFTWARE_ENCODING_SUPPORTED
+        // HEVC rext 8bit and 10bit 4:2:2/4:4:4 don't have a software encoder
+        // currently.
+        if (is_rext) {
+          continue;
+        }
+        // macOS doesn't provide a way to enumerate codec details, so just
+        // assume software codec support is the same as hardware.
+        //
+        // NOTE: Although SW encoder always has lower supported min resolutions
+        // compared with HW encoder, but when both HW and SW encoder exist and
+        // if the resolution is not supported by hardware but supported by
+        // software, and if you set `no-preference`, VT will always emit an
+        // error. Thus, we should just re-use min resolutions of HW encoder for
+        // SW encoder.
+        supported_profile.scalability_modes =
+            always_supported_scalability_modes;
+        supported_profile.rate_control_modes =
+            always_supported_rate_control_modes;
+        supported_profile.is_software_codec = true;
         supported_profiles.push_back(supported_profile);
 
         SupportedProfile portrait_profile(supported_profile);
         portrait_profile.max_resolution.Transpose();
         supported_profiles.push_back(portrait_profile);
-      }
-
-#if SOFTWARE_ENCODING_SUPPORTED
-      // macOS doesn't provide a way to enumerate codec details, so just
-      // assume software codec support is the same as hardware.
-      //
-      // NOTE: Although SW encoder always has lower supported min resolutions
-      // compared with HW encoder, but when both HW and SW encoder exist and if
-      // the resolution is not supported by hardware but supported by software,
-      // and if you set `no-preference`, VT will always emit an error. Thus,
-      // we should just re-use min resolutions of HW encoder for SW encoder.
-      supported_profile.scalability_modes = always_supported_scalability_modes;
-      supported_profile.rate_control_modes =
-          always_supported_rate_control_modes;
-      supported_profile.is_software_codec = true;
-      supported_profiles.push_back(supported_profile);
-
-      SupportedProfile portrait_profile(supported_profile);
-      portrait_profile.max_resolution.Transpose();
-      supported_profiles.push_back(portrait_profile);
 #endif  // SOFTWARE_ENCODING_SUPPORTED
+      }
     }
   }
   return supported_profiles;
@@ -576,11 +1052,11 @@ EncoderStatus VTVideoEncodeAccelerator::Initialize(
   // Clients are expected to call Flush() before reinitializing the encoder.
   DCHECK_EQ(pending_encodes_, 0);
 
-  if (config.input_format != PIXEL_FORMAT_I420 &&
-      config.input_format != PIXEL_FORMAT_NV12) {
+  if (!IsInputFormatSupportedForProfile(config.output_profile,
+                                        config.input_format)) {
     MEDIA_LOG(ERROR, media_log)
-        << "Input format not supported= "
-        << VideoPixelFormatToString(config.input_format);
+        << "Input format " << VideoPixelFormatToString(config.input_format)
+        << " is not supported for " << GetProfileName(config.output_profile);
     return {EncoderStatus::Codes::kEncoderInitializationError};
   }
   if (!std::ranges::contains(GetSupportedVideoCodecProfiles(),
@@ -589,6 +1065,7 @@ EncoderStatus VTVideoEncodeAccelerator::Initialize(
                                 << GetProfileName(config.output_profile);
     return {EncoderStatus::Codes::kEncoderInitializationError};
   }
+  input_format_ = config.input_format;
   profile_ = config.output_profile;
   codec_ = VideoCodecProfileToVideoCodec(config.output_profile);
   client_ = client;
@@ -596,12 +1073,13 @@ EncoderStatus VTVideoEncodeAccelerator::Initialize(
   frame_rate_ = config.framerate;
   bitrate_ = config.bitrate;
   bitstream_buffer_size_ = EstimateBitstreamBufferSize(
-      bitrate_, frame_rate_, config.input_visible_size);
+      bitrate_, frame_rate_, input_format_, config.input_visible_size);
   require_low_delay_ = config.require_low_delay;
   required_encoder_type_ = config.required_encoder_type;
 
-  if (config.HasTemporalLayer())
+  if (config.HasTemporalLayer()) {
     num_temporal_layers_ = config.spatial_layers.front().num_of_temporal_layers;
+  }
 
   if (num_temporal_layers_ > 2) {
     MEDIA_LOG(ERROR, media_log) << "Unsupported number of SVC temporal layers.";
@@ -609,7 +1087,7 @@ EncoderStatus VTVideoEncodeAccelerator::Initialize(
   }
 
   if (config.bitrate.mode() == Bitrate::Mode::kExternal) {
-    if (!IsManualQpSupported(codec_)) {
+    if (!IsManualQpSupported(profile_)) {
       MEDIA_LOG(ERROR, media_log) << "External bitrate mode is not supported.";
       return {EncoderStatus::Codes::kEncoderInitializationError};
     }
@@ -620,12 +1098,23 @@ EncoderStatus VTVideoEncodeAccelerator::Initialize(
     }
   }
 
-  if (!ResetCompressionSession()) {
+  // We don't know the range of the source buffer yet, so we use LIMITED
+  // initially
+  if (!ResetCompressionSession(gfx::ColorSpace::RangeID::LIMITED)) {
     MEDIA_LOG(ERROR, media_log) << "Failed creating compression session.";
     return {EncoderStatus::Codes::kEncoderInitializationError};
   }
 
   auto encoder_info = GetVideoEncoderInfo(compression_session_.get(), config);
+  gpu_supported_pixel_formats_.clear();
+  // Only sessions initialized with candidate GPU input formats (e.g. NV12) can
+  // encode opaque GPU SharedImages. For CPU memory sessions (e.g. I420),
+  // leaving `gpu_supported_pixel_formats_` empty ensures
+  // `CanEncodeOpaqueSharedImage()` rejects all opaque SharedImage frames.
+  if (std::ranges::contains(CandidateGpuInputFormatsForProfile(profile_),
+                            input_format_)) {
+    gpu_supported_pixel_formats_ = encoder_info.gpu_supported_pixel_formats;
+  }
 
   // Report whether hardware encode is being used.
   if (!encoder_info.is_hardware_accelerated) {
@@ -652,23 +1141,197 @@ void VTVideoEncodeAccelerator::Encode(
   DCHECK(compression_session_);
   DCHECK(frame);
 
-  auto pixel_buffer = WrapVideoFrameInCVPixelBuffer(frame);
-  if (!pixel_buffer) {
-    NotifyErrorStatus({EncoderStatus::Codes::kEncoderFailedEncode,
-                       "WrapVideoFrameInCVPixelBuffer failed"});
+  if (frame->HasSharedImage() && !frame->HasMappableSharedImage() &&
+      !CanEncodeOpaqueSharedImage(*frame)) {
+    NotifyErrorStatus(
+        {EncoderStatus::Codes::kEncoderFailedEncode,
+         "Unsupported opaque SharedImage for VideoToolbox encode"});
     return;
   }
 
+  pending_encode_queue_.push_back(
+      std::make_unique<PendingEncode>(std::move(frame), options));
+  ProcessPendingEncodes();
+}
+
+void VTVideoEncodeAccelerator::ProcessPendingEncodes() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  while (!pending_encode_queue_.empty()) {
+    auto& pending = pending_encode_queue_.front();
+    const bool needs_shared_image_resolve =
+        pending->frame->HasSharedImage() &&
+        !pending->frame->HasMappableSharedImage();
+    if (needs_shared_image_resolve) {
+      if (command_buffer_helper_failed_) {
+        FailPendingEncodes(
+            {EncoderStatus::Codes::kGPUCommandBufferNotAvailable,
+             "CommandBufferHelper unavailable for opaque SharedImage encode"});
+        return;
+      }
+      if (!command_buffer_helper_ || !gpu_task_runner_ ||
+          pending->resolve_requested) {
+        return;
+      }
+
+      pending->resolve_requested = true;
+      auto resolve_cb = base::BindPostTaskToCurrentDefault(base::BindOnce(
+          &VTVideoEncodeAccelerator::OnSharedImageResolved, encoder_weak_ptr_));
+      auto [resolve_success_cb, resolve_cancelled_cb] =
+          base::SplitOnceCallback(std::move(resolve_cb));
+      base::ScopedClosureRunner resolve_guard(base::BindOnce(
+          [](PixelBufferResolvedCB callback) {
+            std::move(callback).Run(
+                base::apple::ScopedCFTypeRef<CVPixelBufferRef>(),
+                scoped_refptr<SharedImageEncodeAccess>(),
+                {EncoderStatus::Codes::kSharedImageResolveFailed,
+                 "SharedImage sync token wait was cancelled"});
+          },
+          std::move(resolve_cancelled_cb)));
+      gpu_task_runner_->PostTask(
+          FROM_HERE,
+          base::BindOnce(&ResolveSharedImageOnGpuThread, command_buffer_helper_,
+                         pending->frame, std::move(resolve_success_cb),
+                         std::move(resolve_guard)));
+      return;
+    }
+
+    auto encode = std::move(pending_encode_queue_.front());
+    pending_encode_queue_.pop_front();
+    auto pixel_buffer = WrapVideoFrameInCVPixelBuffer(encode->frame);
+    if (!pixel_buffer) {
+      FailPendingEncodes({EncoderStatus::Codes::kEncoderFailedEncode,
+                          "WrapVideoFrameInCVPixelBuffer failed"});
+      return;
+    }
+    // EncodeWithPixelBuffer() may synchronously notify the client of an error,
+    // and the client may respond by calling Destroy() and deleting this object.
+    auto weak_this = encoder_weak_ptr_;
+    if (!EncodeWithPixelBuffer(std::move(encode->frame), encode->options,
+                               std::move(pixel_buffer),
+                               /*si_access=*/nullptr)) {
+      if (!weak_this) {
+        return;
+      }
+      pending_encode_queue_.clear();
+      auto flush_cb = std::move(pending_flush_cb_);
+      if (flush_cb) {
+        std::move(flush_cb).Run(/*success=*/false);
+      }
+      return;
+    }
+  }
+
+  MaybeFinishFlush();
+}
+
+void VTVideoEncodeAccelerator::FailPendingEncodes(EncoderStatus status) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(!status.is_ok());
+
+  pending_encode_queue_.clear();
+  flush_complete_frames_issued_ = false;
+  auto flush_cb = std::move(pending_flush_cb_);
+  // The client may destroy this object from within the flush callback.
+  auto weak_this = encoder_weak_ptr_;
+  if (flush_cb) {
+    std::move(flush_cb).Run(/*success=*/false);
+    if (!weak_this) {
+      return;
+    }
+  }
+  NotifyErrorStatus(std::move(status));
+}
+
+void VTVideoEncodeAccelerator::OnSharedImageResolved(
+    base::apple::ScopedCFTypeRef<CVPixelBufferRef> pixel_buffer,
+    scoped_refptr<SharedImageEncodeAccess> si_access,
+    EncoderStatus resolve_status) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (pending_encode_queue_.empty()) {
+    return;
+  }
+
+  auto encode = std::move(pending_encode_queue_.front());
+  pending_encode_queue_.pop_front();
+  CHECK(encode->resolve_requested);
+
+  if (!resolve_status.is_ok()) {
+    FailPendingEncodes(std::move(resolve_status));
+    return;
+  }
+
+  // EncodeWithPixelBuffer() may synchronously notify the client of an error,
+  // and the client may respond by calling Destroy() and deleting this object.
+  auto weak_this = encoder_weak_ptr_;
+  if (!EncodeWithPixelBuffer(std::move(encode->frame), encode->options,
+                             std::move(pixel_buffer), std::move(si_access))) {
+    if (!weak_this) {
+      return;
+    }
+    pending_encode_queue_.clear();
+    auto flush_cb = std::move(pending_flush_cb_);
+    if (flush_cb) {
+      std::move(flush_cb).Run(/*success=*/false);
+    }
+    return;
+  }
+  ProcessPendingEncodes();
+}
+
+bool VTVideoEncodeAccelerator::EncodeWithPixelBuffer(
+    scoped_refptr<VideoFrame> frame,
+    const VideoEncoder::EncodeOptions& options,
+    base::apple::ScopedCFTypeRef<CVPixelBufferRef> pixel_buffer,
+    scoped_refptr<SharedImageEncodeAccess> si_access) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(pixel_buffer);
+  if (!compression_session_ || !frame) {
+    NotifyErrorStatus({EncoderStatus::Codes::kEncoderFailedEncode,
+                       "Missing compression session or frame"});
+    return false;
+  }
+
+  bool force_keyframe_after_reset = false;
   if (can_set_encoder_color_space_) {
-    // WrapVideoFrameInCVPixelBuffer() will do a few different things depending
-    // on the input buffer type:
+    // WrapVideoFrameInCVPixelBuffer() / CreatePixelBufferFromSharedImage() will
+    // do a few different things depending on the input buffer type:
     //   * If it's an IOSurface, the underlying attached color space will
     //     passthrough to the pixel buffer.
     //   * If we're uploading to a new pixel buffer and the provided frame color
     //     space is valid that'll be set on the pixel buffer.
     //   * If the frame color space is not valid, BT709 will be assumed.
-    auto frame_cs = GetImageBufferColorSpace(pixel_buffer.get());
-    if (encoder_color_space_ && frame_cs != encoder_color_space_) {
+    //
+    // GetImageBufferColorSpace() is a lossy reverse mapping. Missing or
+    // unmapped attachments come back as an empty ColorSpace even when the
+    // frame did not change; that must not reset the compression session.
+    const gfx::ColorSpace frame_cs =
+        GetImageBufferColorSpace(pixel_buffer.get());
+    // Only MDCV and CLLI are used to configure the session, so only track
+    // those, to avoid resetting the session when other metadata changes.
+    gfx::HDRMetadata frame_hdr_metadata;
+    if (frame->hdr_metadata().HasMDCV()) {
+      frame_hdr_metadata.SetMDCV(frame->hdr_metadata().GetMDCV());
+    }
+    if (frame->hdr_metadata().HasCLLI()) {
+      frame_hdr_metadata.SetCLLI(frame->hdr_metadata().GetCLLI());
+    }
+    // Session is created with limited-range source attributes. Recreate it
+    // before the first full-range frame whenever those attributes encode
+    // range (P010 / NV16 / NV24 / P210 / P410).
+    const bool first_hbd_full_range =
+        !encoder_color_space_.IsValid() &&
+        CVPixelFormatForSourceImageBuffer(input_format_,
+                                          gfx::ColorSpace::RangeID::FULL) &&
+        frame_cs.GetRangeID() == gfx::ColorSpace::RangeID::FULL;
+    const bool color_space_changed = encoder_color_space_.IsValid() &&
+                                     frame_cs.IsValid() &&
+                                     frame_cs != encoder_color_space_;
+    const bool hdr_metadata_changed =
+        encoder_color_space_.IsValid() &&
+        frame_hdr_metadata != encoder_hdr_metadata_;
+    if (first_hbd_full_range || color_space_changed || hdr_metadata_changed) {
       if (pending_encodes_) {
         auto status = VTCompressionSessionCompleteFrames(
             compression_session_.get(), kCMTimeInvalid);
@@ -676,29 +1339,38 @@ void VTVideoEncodeAccelerator::Encode(
           NotifyErrorStatus(
               {EncoderStatus::Codes::kEncoderFailedFlush,
                "flush failed: " + logging::DescriptionFromOSStatus(status)});
-          return;
+          return false;
         }
       }
-      if (!ResetCompressionSession()) {
+      // Unreadable `frame_cs` has RangeID::INVALID, which
+      // CVPixelFormatForVideoFrame() treats as LIMITED. Keep the latched
+      // range instead.
+      const auto source_range = frame_cs.IsValid()
+                                    ? frame_cs.GetRangeID()
+                                    : encoder_color_space_.GetRangeID();
+      if (!ResetCompressionSession(source_range)) {
         // ResetCompressionSession() invokes NotifyErrorStatus() on failure.
-        return;
+        return false;
       }
-      encoder_color_space_.reset();
+      encoder_color_space_ = gfx::ColorSpace();
+      encoder_hdr_metadata_.Reset();
+      force_keyframe_after_reset = true;
     }
 
-    if (!encoder_color_space_) {
+    if (!encoder_color_space_.IsValid() && frame_cs.IsValid()) {
       encoder_color_space_ = frame_cs;
+      encoder_hdr_metadata_ = frame_hdr_metadata;
       SetEncoderColorSpace();
     }
   }
 
   NSMutableDictionary* frame_props = [NSMutableDictionary dictionary];
   frame_props[CFToNSPtrCast(kVTEncodeFrameOptionKey_ForceKeyFrame)] =
-      options.key_frame ? @YES : @NO;
+      (options.key_frame || force_keyframe_after_reset) ? @YES : @NO;
 
   std::optional<int> frame_qp;
-  if (@available(macOS LOW_LATENCY_AND_SVC_AVAILABLE_VER, iOS 15.0, *)) {
-    if (IsManualQpSupported(codec_) &&
+  if (@available(iOS 15.0, *)) {
+    if (IsManualQpSupported(profile_) &&
         bitrate_.mode() == Bitrate::Mode::kExternal &&
         options.quantizer.has_value()) {
       DCHECK(require_low_delay_);
@@ -721,9 +1393,9 @@ void VTVideoEncodeAccelerator::Encode(
 
   // Wrap information we'll need after the frame is encoded in a heap object.
   // We'll get the pointer back from the VideoToolbox completion callback.
+  // |si_access| keeps the SharedImage overlay read lock alive until then.
   auto request = std::make_unique<InProgressFrameEncode>(
-      std::move(frame), encoder_color_space_.value_or(gfx::ColorSpace()),
-      frame_qp);
+      std::move(frame), encoder_color_space_, frame_qp, std::move(si_access));
 
   // Pass the ownership of `request` to the encode callback, then release the
   // smart pointer.
@@ -741,14 +1413,15 @@ void VTVideoEncodeAccelerator::Encode(
     NotifyErrorStatus({EncoderStatus::Codes::kOutOfPlatformEncoders,
                        "No more encoders available. " +
                            logging::DescriptionFromOSStatus(status)});
-    return;
+    return false;
   }
   if (status != noErr) {
     NotifyErrorStatus({EncoderStatus::Codes::kSystemAPICallError,
                        "VTCompressionSessionEncodeFrame failed: " +
                            logging::DescriptionFromOSStatus(status)});
-    return;
+    return false;
   }
+  return true;
 }
 
 void VTVideoEncodeAccelerator::UseOutputBitstreamBuffer(
@@ -844,6 +1517,7 @@ void VTVideoEncodeAccelerator::RequestEncodingParametersChange(
 void VTVideoEncodeAccelerator::Destroy() {
   DVLOG(3) << __func__;
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  pending_encode_queue_.clear();
   delete this;
 }
 
@@ -857,25 +1531,54 @@ void VTVideoEncodeAccelerator::Flush(FlushCallback flush_callback) {
     return;
   }
 
-  // Even though this will block until all frames are returned, the frames will
-  // be posted to the current task runner, so we can't run the flush callback
-  // at this time.
-  OSStatus status = VTCompressionSessionCompleteFrames(
-      compression_session_.get(), kCMTimeInvalid);
+  pending_flush_cb_ = std::move(flush_callback);
+  flush_complete_frames_issued_ = false;
+  ProcessPendingEncodes();
+}
 
-  if (status != noErr) {
-    OSSTATUS_DLOG(ERROR, status)
-        << " VTCompressionSessionCompleteFrames failed: ";
-    std::move(flush_callback).Run(/*success=*/false);
+void VTVideoEncodeAccelerator::MaybeFinishFlush() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!pending_flush_cb_ || !pending_encode_queue_.empty()) {
     return;
   }
 
-  pending_flush_cb_ = std::move(flush_callback);
+  if (!flush_complete_frames_issued_) {
+    // Even though this will block until all frames are returned, the frames
+    // will be posted to the current task runner, so we can't run the flush
+    // callback at this time.
+    OSStatus status = VTCompressionSessionCompleteFrames(
+        compression_session_.get(), kCMTimeInvalid);
+    if (status != noErr) {
+      // Report the failure reason before failing the flush, matching
+      // CompressionCallbackTask(). NotifyErrorStatus() may synchronously
+      // destroy this object, so take ownership of the callback first.
+      auto flush_cb = std::move(pending_flush_cb_);
+      if (status == kVTVideoEncoderNotAvailableNowErr ||
+          status == kVTCouldNotCreateInstanceErr) {
+        NotifyErrorStatus({EncoderStatus::Codes::kOutOfPlatformEncoders,
+                           "No more encoders available. " +
+                               logging::DescriptionFromOSStatus(status)});
+      } else {
+        NotifyErrorStatus({EncoderStatus::Codes::kEncoderFailedFlush,
+                           "VTCompressionSessionCompleteFrames failed: " +
+                               logging::DescriptionFromOSStatus(status)});
+      }
+      std::move(flush_cb).Run(/*success=*/false);
+      return;
+    }
+    flush_complete_frames_issued_ = true;
+  }
+
   MaybeRunFlushCallback();
 }
 
 bool VTVideoEncodeAccelerator::IsFlushSupported() {
   return true;
+}
+
+bool VTVideoEncodeAccelerator::IsGpuFrameResizeSupported() {
+  return base::FeatureList::IsEnabled(
+      kVTVideoEncodeAcceleratorOpaqueSharedImageEncode);
 }
 
 // static
@@ -971,10 +1674,19 @@ void VTVideoEncodeAccelerator::ReturnBitstreamBuffer(
       objectForKey:CFToNSPtrCast(kCMSampleAttachmentKey_IsDependedOnByOthers)];
   const bool belongs_to_base_layer = !depended || [depended boolValue];
 
+  std::vector<uint8_t> hdr_metadata_sei_nalu;
+  if (keyframe && encode_output->encoded_color_space.GetTransferID() ==
+                      gfx::ColorSpace::TransferID::PQ) {
+    hdr_metadata_sei_nalu =
+        BuildHdrMetadataSeiNalu(codec_, encode_output->sample_buffer.get());
+  }
+
   size_t used_buffer_size = 0;
   const bool copy_rv = video_toolbox::CopySampleBufferToAnnexBBuffer(
-      codec_, encode_output->sample_buffer.get(), keyframe, buffer_ref->size,
-      static_cast<char*>(buffer_ref->mapping.memory()), &used_buffer_size);
+      codec_, encode_output->sample_buffer.get(), keyframe,
+      hdr_metadata_sei_nalu,
+      buffer_ref->mapping.GetMemoryAsSpan<char>().first(buffer_ref->size),
+      &used_buffer_size);
   if (!copy_rv) {
     NotifyErrorStatus(
         {EncoderStatus::Codes::kBitstreamConversionError,
@@ -1009,30 +1721,69 @@ void VTVideoEncodeAccelerator::ReturnBitstreamBuffer(
     md.qp = encode_output->qp.value();
   }
 
+  if (calculate_psnr_) {
+    if (@available(macOS 14.4, iOS 17.4, *)) {
+      NSDictionary* quality_metrics = [sample_attachments
+          objectForKey:CFToNSPtrCast(kVTSampleAttachmentKey_QualityMetrics)];
+      if (quality_metrics) {
+        NSNumber* luma_mse = [quality_metrics
+            objectForKey:
+                CFToNSPtrCast(
+                    kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError)];
+        NSNumber* chroma_blue_mse = [quality_metrics
+            objectForKey:
+                CFToNSPtrCast(
+                    kVTSampleAttachmentQualityMetricsKey_ChromaBlueMeanSquaredError)];
+        NSNumber* chroma_red_mse = [quality_metrics
+            objectForKey:
+                CFToNSPtrCast(
+                    kVTSampleAttachmentQualityMetricsKey_ChromaRedMeanSquaredError)];
+        if (luma_mse && chroma_blue_mse && chroma_red_mse) {
+          // YUV isn't the same as YCbCr, but we don't have a good way to report
+          // the latter and in practice the difference will be small (luma vs
+          // chroma is still a valid comparison).
+          double y_mse = [luma_mse doubleValue];
+          double cb_mse = [chroma_blue_mse doubleValue];
+          double cr_mse = [chroma_red_mse doubleValue];
+
+          md.yuv_psnr = YuvPsnr{
+              .y = CalculatePsnr(y_mse, input_format_),
+              .u = CalculatePsnr(cb_mse, input_format_),  // Cb -> U
+              .v = CalculatePsnr(cr_mse, input_format_),  // Cr -> V
+          };
+        }
+      }
+    }
+  }
+
   client_->BitstreamBufferReady(buffer_ref->id, std::move(md));
   MaybeRunFlushCallback();
 }
 
-bool VTVideoEncodeAccelerator::ResetCompressionSession() {
+bool VTVideoEncodeAccelerator::ResetCompressionSession(
+    gfx::ColorSpace::RangeID source_range) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   compression_session_.reset();
 
+  auto source_attrs = CreateSourceImageBufferAttributes(
+      input_format_, input_visible_size_, source_range);
   if (auto created = CreateCompressionSession(
-          codec_, input_visible_size_, required_encoder_type_,
+          profile_, input_visible_size_, required_encoder_type_,
           require_low_delay_, &VTVideoEncodeAccelerator::CompressionCallback,
-          this);
+          this, source_attrs.get());
       created.has_value()) {
     compression_session_ = std::move(created.value());
+  } else if (created.error() == kVTVideoEncoderNotAvailableNowErr ||
+             created.error() == kVTCouldNotCreateInstanceErr) {
+    NotifyErrorStatus({EncoderStatus::Codes::kOutOfPlatformEncoders,
+                       "VTCompressionSessionCreate failed", "system_error",
+                       logging::DescriptionFromOSStatus(created.error())});
+    return false;
   } else {
-    EncoderStatusTraits::Codes status_code =
-        (created.error() == kVTVideoEncoderNotAvailableNowErr ||
-         created.error() == kVTCouldNotCreateInstanceErr)
-            ? EncoderStatus::Codes::kOutOfPlatformEncoders
-            : EncoderStatus::Codes::kEncoderInitializationError;
-    NotifyErrorStatus(
-        {status_code, "VTCompressionSessionCreate failed: " +
-                          logging::DescriptionFromOSStatus(created.error())});
+    NotifyErrorStatus({EncoderStatus::Codes::kEncoderInitializationError,
+                       "VTCompressionSessionCreate failed", "system_error",
+                       logging::DescriptionFromOSStatus(created.error())});
     return false;
   }
 
@@ -1050,8 +1801,8 @@ bool VTVideoEncodeAccelerator::ConfigureCompressionSession(VideoCodec codec) {
 
   video_toolbox::SessionPropertySetter session_property_setter(
       compression_session_);
-  if (!session_property_setter.Set(kVTCompressionPropertyKey_ProfileLevel,
-                                   VideoCodecProfileToVTProfile(profile_))) {
+  if (!SetSessionProfileLevel(session_property_setter, profile_,
+                              input_format_)) {
     NotifyErrorStatus({EncoderStatus::Codes::kEncoderUnsupportedProfile,
                        "Unsupported profile: " + GetProfileName(profile_)});
     return false;
@@ -1069,6 +1820,31 @@ bool VTVideoEncodeAccelerator::ConfigureCompressionSession(VideoCodec codec) {
         {EncoderStatus::Codes::kEncoderUnsupportedConfig,
          "The video encoder doesn't support non frame reordering compression"});
     return false;
+  }
+  if (base::FeatureList::IsEnabled(
+          kVTVideoEncodeAcceleratorOpaqueSharedImageEncode)) {
+    if (session_property_setter.IsSupported(
+            kVTCompressionPropertyKey_PixelTransferProperties)) {
+      // Keep the crop/scale geometry aligned with VideoFrameConverter:
+      // VideoFrameConverter scales the visible rect rather than the entire
+      // coded buffer. VideoFrame::visible_rect() is propagated as the source
+      // CVPixelBuffer's clean aperture. VT's default scaling mode stretches the
+      // full source buffer, so explicitly crop to that aperture before scaling.
+      NSDictionary* pixel_transfer_properties = @{
+        CFToNSPtrCast(kVTPixelTransferPropertyKey_ScalingMode) :
+            CFToNSPtrCast(kVTScalingMode_CropSourceToCleanAperture)
+      };
+      if (!session_property_setter.Set(
+              kVTCompressionPropertyKey_PixelTransferProperties,
+              NSToCFPtrCast(pixel_transfer_properties))) {
+        NotifyErrorStatus({EncoderStatus::Codes::kEncoderUnsupportedConfig,
+                           "The video encoder doesn't support cropping to the "
+                           "clean aperture"});
+        return false;
+      }
+    } else {
+      DLOG(WARNING) << "ScalingMode property is not supported";
+    }
   }
   // Limit keyframe output to 4 minutes, see https://crbug.com/658429.
   if (!session_property_setter.Set(
@@ -1110,19 +1886,33 @@ bool VTVideoEncodeAccelerator::ConfigureCompressionSession(VideoCodec codec) {
     DLOG(WARNING) << "MaxFrameDelayCount is not supported";
   }
 
+  if (@available(macOS 14.4, iOS 17.4, *)) {
+    if (session_property_setter.IsSupported(
+            kVTCompressionPropertyKey_CalculateMeanSquaredError)) {
+      if (session_property_setter.Set(
+              kVTCompressionPropertyKey_CalculateMeanSquaredError, true)) {
+        calculate_psnr_ = true;
+      } else {
+        DLOG(WARNING) << "Failed to set CalculateMeanSquaredError property";
+      }
+    } else {
+      DVLOG(1) << "CalculateMeanSquaredError is not supported or not enabled";
+    }
+  }
+
   if (num_temporal_layers_ != 2) {
     return true;
   }
 
   if (!IsHardwareEncoder(compression_session_.get()) ||
-      !IsSVCSupported(codec)) {
+      !IsSVCSupported(profile_)) {
     NotifyErrorStatus({EncoderStatus::Codes::kEncoderUnsupportedConfig,
                        "SVC encoding is not supported on this OS version or "
                        "hardware, or SW encoding was selected"});
     return false;
   }
 
-  if (@available(macOS LOW_LATENCY_AND_SVC_AVAILABLE_VER, iOS 15.0, *)) {
+  if (@available(iOS 15.0, *)) {
     if (!session_property_setter.IsSupported(
             kVTCompressionPropertyKey_BaseLayerFrameRateFraction)) {
       NotifyErrorStatus({EncoderStatus::Codes::kEncoderUnsupportedConfig,
@@ -1139,17 +1929,17 @@ bool VTVideoEncodeAccelerator::ConfigureCompressionSession(VideoCodec codec) {
 
   // Configuring the number of reference frames to 1, which will produce
   // bitstream that follows WebRTC SVC spec for L1T2.
-  if (@available(macOS 13.0, iOS 16.0, *)) {
-    bool skip_set_reference_buffer_count = false;
-    if (@available(macOS 26, *)) {
-      // We see that setting kVTCompressionPropertyKey_ReferenceBufferCount=1
-      // causes frame drops on Mac OS Tahoe when encoding H264,
-      // that's why we skip it. More info: http://crbug.com/450596068
-      // Using an extra flag here because @available checks can't be combined
-      // with other conditions in the same if statement,
-      // see the `unsupported-availability-guard` warning.
-      skip_set_reference_buffer_count = (codec == VideoCodec::kH264);
-    }
+  bool skip_set_reference_buffer_count = false;
+  if (@available(macOS 26, *)) {
+    // We see that setting kVTCompressionPropertyKey_ReferenceBufferCount=1
+    // causes frame drops on Mac OS Tahoe when encoding H264,
+    // that's why we skip it. More info: http://crbug.com/450596068
+    // Using an extra flag here because @available checks can't be combined
+    // with other conditions in the same if statement,
+    // see the `unsupported-availability-guard` warning.
+    skip_set_reference_buffer_count = (codec == VideoCodec::kH264);
+  }
+  if (@available(iOS 16, *)) {
     if (!skip_set_reference_buffer_count &&
         session_property_setter.IsSupported(
             kVTCompressionPropertyKey_ReferenceBufferCount)) {
@@ -1162,6 +1952,8 @@ bool VTVideoEncodeAccelerator::ConfigureCompressionSession(VideoCodec codec) {
     } else {
       DLOG(WARNING) << "ReferenceBufferCount is not supported";
     }
+  } else {
+    DLOG(WARNING) << "ReferenceBufferCount is not supported";
   }
 
   return true;
@@ -1170,25 +1962,29 @@ bool VTVideoEncodeAccelerator::ConfigureCompressionSession(VideoCodec codec) {
 void VTVideoEncodeAccelerator::MaybeRunFlushCallback() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!pending_flush_cb_)
+  if (!pending_flush_cb_) {
     return;
+  }
 
-  if (pending_encodes_ || !encoder_output_queue_.empty())
+  if (pending_encodes_ || !encoder_output_queue_.empty() ||
+      !pending_encode_queue_.empty()) {
     return;
+  }
 
+  flush_complete_frames_issued_ = false;
   std::move(pending_flush_cb_).Run(/*success=*/true);
 }
 
 void VTVideoEncodeAccelerator::SetEncoderColorSpace() {
-  if (!encoder_color_space_ || !encoder_color_space_->IsValid()) {
+  if (!encoder_color_space_.IsValid()) {
     return;
   }
 
   CFStringRef primary, transfer, matrix;
-  if (!GetImageBufferColorValues(*encoder_color_space_, &primary, &transfer,
+  if (!GetImageBufferColorValues(encoder_color_space_, &primary, &transfer,
                                  &matrix)) {
     DLOG(ERROR) << "Failed to set bitstream color space: "
-                << encoder_color_space_->ToString();
+                << encoder_color_space_.ToString();
     return;
   }
 
@@ -1216,17 +2012,20 @@ void VTVideoEncodeAccelerator::SetEncoderColorSpace() {
     return;
   }
 
-  DVLOG(1) << "Set encoder color space to: "
-           << encoder_color_space_->ToString();
+  DVLOG(1) << "Set encoder color space to: " << encoder_color_space_.ToString();
+
+  // HDR10 is a PQ format. HLG signals its transfer function through the VUI and
+  // must not get PQ-style mastering metadata.
+  if (encoder_color_space_.GetTransferID() == gfx::ColorSpace::TransferID::PQ) {
+    ConfigureVtSessionForHdrMetadata(session_property_setter,
+                                     encoder_hdr_metadata_);
+  }
 }
 
 void VTVideoEncodeAccelerator::NotifyErrorStatus(EncoderStatus status) {
   CHECK(!status.is_ok());
-  LOG(ERROR) << "Call NotifyErrorStatus(): code="
-             << static_cast<int>(status.code())
-             << ", message=" << status.message();
   if (media_log_) {
-    MEDIA_LOG(ERROR, media_log_) << status.message();
+    media_log_->NotifyError(status);
   }
   // NotifyErrorStatus() can be called without calling Initialize() in the case
   // of GetSupportedProfiles().
@@ -1236,11 +2035,98 @@ void VTVideoEncodeAccelerator::NotifyErrorStatus(EncoderStatus status) {
   client_->NotifyErrorStatus(std::move(status));
 }
 
+void VTVideoEncodeAccelerator::SetCommandBufferHelperCB(
+    base::RepeatingCallback<scoped_refptr<CommandBufferHelper>()>
+        get_command_buffer_helper_cb,
+    scoped_refptr<base::SingleThreadTaskRunner> gpu_task_runner) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!base::FeatureList::IsEnabled(
+          kVTVideoEncodeAcceleratorOpaqueSharedImageEncode)) {
+    return;
+  }
+  gpu_task_runner_ = std::move(gpu_task_runner);
+  auto [reply, cancelled_reply] = base::SplitOnceCallback(
+      base::BindOnce(&VTVideoEncodeAccelerator::OnCommandBufferHelperAvailable,
+                     encoder_weak_ptr_));
+  base::ScopedClosureRunner reply_guard(
+      base::BindOnce(std::move(cancelled_reply), nullptr));
+  gpu_task_runner_->PostTaskAndReplyWithResult(
+      FROM_HERE, std::move(get_command_buffer_helper_cb),
+      base::BindOnce(
+          [](CommandBufferHelperResolvedCB reply,
+             base::ScopedClosureRunner reply_guard,
+             scoped_refptr<CommandBufferHelper> command_buffer_helper) {
+            reply_guard.ReplaceClosure(base::OnceClosure());
+            std::move(reply).Run(std::move(command_buffer_helper));
+          },
+          std::move(reply), std::move(reply_guard)));
+}
+
+void VTVideoEncodeAccelerator::OnCommandBufferHelperAvailable(
+    scoped_refptr<CommandBufferHelper> command_buffer_helper) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  command_buffer_helper_ = std::move(command_buffer_helper);
+  if (!command_buffer_helper_) {
+    command_buffer_helper_failed_ = true;
+    if (!pending_encode_queue_.empty()) {
+      FailPendingEncodes(
+          {EncoderStatus::Codes::kGPUCommandBufferNotAvailable,
+           "CommandBufferHelper unavailable for opaque SharedImage encode"});
+    }
+    return;
+  }
+  ProcessPendingEncodes();
+}
+
+bool VTVideoEncodeAccelerator::CanEncodeOpaqueSharedImage(
+    const VideoFrame& frame) const {
+  DCHECK(frame.HasSharedImage());
+  DCHECK(!frame.HasMappableSharedImage());
+  if (!base::FeatureList::IsEnabled(
+          kVTVideoEncodeAcceleratorOpaqueSharedImageEncode)) {
+    return false;
+  }
+  // SharedImages must have SCANOUT (e.g. WebGL, WebGPU) or
+  // MACOS_VIDEO_TOOLBOX (e.g. canvas, camera capture, video decoders) usage so
+  // that they are IOSurface-backed and ProduceVideo succeeds on the GPU thread.
+  //
+  // Note: For CPU memory sessions (such as I420),
+  // `gpu_supported_pixel_formats_` is left empty in `Initialize()`, ensuring
+  // this always returns false.
+  return frame.shared_image()->usage().HasAny(
+             gpu::SHARED_IMAGE_USAGE_SCANOUT |
+             gpu::SHARED_IMAGE_USAGE_MACOS_VIDEO_TOOLBOX) &&
+         std::ranges::contains(gpu_supported_pixel_formats_, frame.format());
+}
+
 base::TimeDelta VTVideoEncodeAccelerator::AssignMonotonicTimestamp() {
   const base::TimeDelta step = base::Seconds(1) / frame_rate_;
   auto result = next_timestamp_;
   next_timestamp_ += step;
   return result;
+}
+
+// static
+double VTVideoEncodeAccelerator::CalculatePsnr(double mse,
+                                               VideoPixelFormat format) {
+  DCHECK_GE(mse, 0.0);
+  DCHECK(format == PIXEL_FORMAT_I420 || format == PIXEL_FORMAT_NV12 ||
+         format == PIXEL_FORMAT_NV16 || format == PIXEL_FORMAT_NV24 ||
+         format == PIXEL_FORMAT_P010LE || format == PIXEL_FORMAT_P210LE ||
+         format == PIXEL_FORMAT_P410LE);
+  const double max_value = (1 << BitDepth(format)) - 1;
+  if (mse == 0.0) {
+    return 128.0;
+  }
+  double psnr = 10.0 * std::log10((max_value * max_value) / mse);
+  return std::min(psnr, 128.0);
+}
+
+// static
+double VTVideoEncodeAccelerator::CalculatePsnrForTesting(
+    double mse,
+    VideoPixelFormat format) {
+  return CalculatePsnr(mse, format);
 }
 
 }  // namespace media

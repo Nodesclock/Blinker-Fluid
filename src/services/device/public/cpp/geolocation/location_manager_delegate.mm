@@ -60,9 +60,6 @@
   position.longitude = location.coordinate.longitude;
   position.timestamp = base::Time::FromSecondsSinceUnixEpoch(
       location.timestamp.timeIntervalSince1970);
-  // iOS-14 back-deploy: -ellipsoidalAltitude is iOS 15+ (absent selector on
-  // iOS 14); fall back to -altitude there. (Nested rather than && so the
-  // availability check is the whole if-condition, which clang requires.)
   position.altitude = location.altitude;
   if (base::FeatureList::IsEnabled(features::kEllipsoidalAltitude)) {
     if (__builtin_available(iOS 15, macOS 12, *)) {

@@ -22,7 +22,6 @@ NativeWebKeyboardEvent::NativeWebKeyboardEvent(
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
-// BrowserEngineKit supplies this native-event variant only on iOS 17.4+.
 NativeWebKeyboardEvent::NativeWebKeyboardEvent(gfx::NativeEvent native_event)
     : WebKeyboardEvent(WebKeyboardEventBuilder::Build(native_event)),
       os_event(native_event),

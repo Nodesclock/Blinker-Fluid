@@ -35,10 +35,6 @@
 #include "ui/gfx/overlay_plane_data.h"
 #include "ui/gl/ca_renderer_layer_params.h"
 
-#if BUILDFLAG(IS_MAC)
-#include "base/power_monitor/power_monitor.h"
-#endif
-
 #if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
 #include "gpu/ipc/common/ios/be_layer_hierarchy_transport.h"
 #endif
@@ -67,18 +63,6 @@ BASE_FEATURE(kAVFoundationOverlays,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
 #if BUILDFLAG(IS_MAC)
-BASE_FEATURE(kAllowCallbackWithoutPostTask, base::FEATURE_ENABLED_BY_DEFAULT);
-
-// Allows running completion callbacks and presnetation callbacks directly
-// without posting tasks first.
-bool AllowCallbackWithoutPostTask() {
-  static bool allows_no_post_task =
-      base::FeatureList::IsEnabled(kAllowCallbackWithoutPostTask) &&
-      (ui::DisplayLinkMac::SupportsDisplayLinkMacInBrowser() ||
-       base::FeatureList::IsEnabled(features::kEnableDrDc));
-  return allows_no_post_task;
-}
-
 // Record the delay from the system CVDisplayLink or CADisplaylink source to
 // CrGpuMain OnVSyncPresentation().
 void RecordVSyncCallbackDelay(base::TimeDelta delay) {
@@ -133,13 +117,6 @@ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
     : weak_ptr_factory_(this) {
   static bool av_disabled_at_command_line =
       !base::FeatureList::IsEnabled(kAVFoundationOverlays);
-  // The AVSampleBufferDisplayLayer path was disabled here while fullscreen
-  // video was black, on the theory that the layer could not draw under this
-  // port's directly-attached CALayer tree. The real defect was upstream never
-  // flushing a layer that reports requiresFlushToResumeDecoding, which strands
-  // it rendering nothing; ca_renderer_layer_tree.mm now flushes, retries once,
-  // and downgrades to the IOSurface path if the layer still will not render.
-  // With a working fallback the video path can be trusted again.
 
   auto buffer_presented_callback =
       base::BindRepeating(&BufferPresented, weak_ptr_factory_.GetWeakPtr());
@@ -148,32 +125,13 @@ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
       base::BindRepeating(&SharedContextState::MakeCurrent, context_state,
                           /*surface=*/nullptr, /*needs_gl=*/true);
 
-  bool no_post_task_for_callback = false;
-#if BUILDFLAG(IS_MAC)
-  no_post_task_for_callback = AllowCallbackWithoutPostTask();
-
-  if (ui::DisplayLinkMac::SupportsDisplayLinkMacInBrowser()) {
-    bool is_system_suspended =
-        base::PowerMonitor::GetInstance()
-            ->AddPowerSuspendObserverAndReturnSuspendedState(this);
-    if (is_system_suspended) {
-      OnSuspend();
-    }
-  }
-#endif
-
   ca_layer_tree_coordinator_ = std::make_unique<ui::CALayerTreeCoordinator>(
       !av_disabled_at_command_line, std::move(buffer_presented_callback),
-      std::move(gl_make_current_callback), GetMTLDevice(context_state),
-      no_post_task_for_callback);
+      std::move(gl_make_current_callback), GetMTLDevice(context_state));
 
 #if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
-  // iOS-15 port: instead of wrapping the GPU's root CALayer in a
-  // BELayerHierarchy and shipping it to the browser over XPC (BrowserEngineKit,
-  // iOS 17.4+ only), attach it DIRECTLY to the on-screen view. We are
-  // single-process, so the GPU thread and the browser UI share an address
-  // space: look up the CALayerFrameSinkProvider (now a plain UIView) by surface
-  // handle and add the rendered layer as a sublayer.
+  // GPU і UI в одному процесі, CALayer з GPU чіпляємо прямо до view без BEK і
+  // XPC
   CALayer* root_ca_layer = ca_layer_tree_coordinator_->root_ca_layer();
   uint64_t handle = static_cast<uint64_t>(surface_handle);
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -203,12 +161,6 @@ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
 
 ImageTransportSurfaceOverlayMacEGL::~ImageTransportSurfaceOverlayMacEGL() {
   ca_layer_tree_coordinator_.reset();
-
-#if BUILDFLAG(IS_MAC)
-  if (ui::DisplayLinkMac::SupportsDisplayLinkMacInBrowser()) {
-    base::PowerMonitor::GetInstance()->RemovePowerSuspendObserver(this);
-  }
-#endif
 
 #if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
   // Capture and retain the BELayerHierarchy in a local __block var before
@@ -334,25 +286,24 @@ void ImageTransportSurfaceOverlayMacEGL::SetMaxPendingSwaps(
 }
 
 #if BUILDFLAG(IS_MAC)
-void ImageTransportSurfaceOverlayMacEGL::SetVSyncDisplayID(int64_t display_id) {
-  if (!display_link_mac_ || display_id != display_id_) {
-    vsync_callback_mac_ = nullptr;
-
-    // Commit all pending frames before switching to the new monitor.
-    while (ca_layer_tree_coordinator_->NumPendingSwaps()) {
-      vsync_callback_mac_keep_alive_counter_ =
-          std::max(vsync_callback_mac_keep_alive_counter_, 1);
-      OnVSyncPresentation(ui::VSyncParamsMac());
-    }
-
-    display_link_mac_ = ui::DisplayLinkMac::GetForDisplay(display_id);
+void ImageTransportSurfaceOverlayMacEGL::SetVSyncDisplayID(int64_t display_id,
+                                                           bool force_update) {
+  if (display_id_ == display_id && !force_update) {
+    return;
   }
-  display_id_ = display_id;
-}
 
-void ImageTransportSurfaceOverlayMacEGL::RefreshRateChangedOnSameDisplay() {
-  // TODO(crbug.com/345275139): For CADisplayLink only. Notify DisplayLinkMac
-  // and re-create a new displayLink if needed.
+  vsync_callback_mac_ = nullptr;
+
+  // Commit all pending frames before switching to the new monitor.
+  while (ca_layer_tree_coordinator_->NumPendingSwaps()) {
+    vsync_callback_mac_keep_alive_counter_ =
+        std::max(vsync_callback_mac_keep_alive_counter_, 1);
+    OnVSyncPresentation(ui::VSyncParamsMac());
+  }
+
+  display_link_mac_ = ui::DisplayLinkMac::GetForDisplay(display_id);
+
+  display_id_ = display_id;
 }
 
 base::TimeTicks ImageTransportSurfaceOverlayMacEGL::GetDisplaytime(
@@ -425,19 +376,6 @@ void ImageTransportSurfaceOverlayMacEGL::OnVSyncPresentation(
   if (vsync_callback_mac_keep_alive_counter_ == 0) {
     vsync_callback_mac_ = nullptr;
   }
-}
-
-void ImageTransportSurfaceOverlayMacEGL::OnSuspend() {
-  // TODO(crbug.com/345275139): For CADisplayLink only. Notify DisplayLinkMac
-  // and destroy the current displayLink if needed.
-}
-
-void ImageTransportSurfaceOverlayMacEGL::OnResume() {
-  // Only needs the first power suspend-resume event.
-  base::PowerMonitor::GetInstance()->RemovePowerSuspendObserver(this);
-
-  // TODO(crbug.com/345275139): For CADisplayLink only. Notify DisplayLinkMac
-  // and re-create a new displayLink if needed.
 }
 #endif
 }  // namespace gpu

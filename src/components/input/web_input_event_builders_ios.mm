@@ -39,12 +39,8 @@ size_t GetTouchPointerId(UITouch* touch) {
   return 0;
 }
 
-// This table assumes UIKit delivers a began/ended pair for every touch. It does
-// not: a view-hierarchy change mid-sequence (entering fullscreen) or a gesture
-// recognizer claiming the touch can strand an entry, and once every slot holds a
-// stranded touch nothing can be registered again -- every later touch resolves
-// to id 0 and the CHECK in CreateWebTouchPoint aborts the process. Recover
-// instead, since a dropped touch point is always better than a dead browser.
+// UIKit не завжди дає пару began/ended і завислі записи займають слоти
+// CHECK у CreateWebTouchPoint вбив би процес, тому відновлюємо
 size_t AddUITouch(UITouch* touch) {
   size_t existing = GetTouchPointerId(touch);
   if (existing != 0) {
@@ -56,8 +52,6 @@ size_t AddUITouch(UITouch* touch) {
       return i + 1;
     }
   }
-  // Every slot is stale: a live sequence can never hold them all, because UIKit
-  // caps simultaneous touches well below this. Drop the table and take slot 0.
   for (size_t i = 0; i < MAX_POINTERS; ++i) {
     UNSAFE_TODO(g_active_touches[i]) = nil;
   }
@@ -72,7 +66,6 @@ void RemoveUITouch(UITouch* touch) {
       return;
     }
   }
-  // Already gone -- the began half never reached us, or it was cleared above.
 }
 
 int ModifiersFromEvent(UIKeyModifierFlags modifier_flags) {
@@ -144,10 +137,8 @@ blink::WebTouchPoint CreateWebTouchPoint(
     const std::optional<gfx::Vector2dF>& view_offset) {
   blink::WebTouchPoint touch;
 
-  // An unregistered touch means its began phase never reached this view (see
-  // AddUITouch). Report it with the id it resolved to instead of aborting; do
-  // not register it here, since inventing a table entry for a touch whose
-  // sequence this view never owned only strands another slot.
+  // незареєстрований дотик, began сюди не дійшов
+  // id віддаємо як є, без реєстрації
   size_t pointer_index = GetTouchPointerId(event);
 
   SetWebPointerPropertiesFromMotionEventData(touch, pointer_index,
@@ -381,6 +372,17 @@ blink::WebTouchEvent WebTouchEventBuilder::Build(
         CreateWebTouchPoint(view, UNSAFE_TODO(g_active_touches[i]),
                             /*was_changed=*/false, view_offset);
     ++touch_index;
+  }
+  if (type == blink::WebInputEvent::Type::kTouchCancel) {
+    // MotionEventWeb падає на CHECK якщо в скасуванні лишилась нескасована
+    // точка
+    for (size_t i = 0; i < touch_index; ++i) {
+      UNSAFE_TODO(result.touches[i]).state =
+          blink::WebTouchPoint::State::kStateCancelled;
+    }
+    for (size_t i = 0; i < MAX_POINTERS; ++i) {
+      UNSAFE_TODO(g_active_touches[i]) = nil;
+    }
   }
   result.touches_length = touch_index;
   DCHECK_GT(result.touches_length, 0U);

@@ -29,9 +29,8 @@ AudioSessionManagerIOS::AudioSessionManagerIOS() {
   NSError* error = nil;
   AVAudioSessionCategoryOptions options;
 #if !BUILDFLAG(IS_IOS_TVOS)
-  // Playback follows the system-selected speaker/headphone/A2DP route.
-  // AllowBluetoothA2DP is a PlayAndRecord routing option and can leave a
-  // Playback session with mismatched volume and output routes.
+  // Playback іде за маршрутом системи. AllowBluetoothA2DP тільки для
+  // PlayAndRecord, в Playback ламає гучність
   options = AVAudioSessionCategoryOptionMixWithOthers;
 #else
   options = 0;
@@ -39,9 +38,8 @@ AudioSessionManagerIOS::AudioSessionManagerIOS() {
 
   AVAudioSessionCategory category;
 #if !BUILDFLAG(IS_IOS_TVOS)
-  // Keep normal playback on the high-quality A2DP route. PlayAndRecord
-  // activates the headset microphone and degrades all other audio to call
-  // quality even when no page is recording.
+  // PlayAndRecord вмикає мікрофон гарнітури і звук стає як у дзвінку,
+  // навіть коли сторінка нічого не пише
   category = AVAudioSessionCategoryPlayback;
 #else
   category = AVAudioSessionCategoryPlayback;

@@ -34,7 +34,6 @@
 #endif
 
 extern "C" void BlinkBootLog(const char* stage);
-// Defined by the shell app delegate; absent from non-shell iOS targets.
 extern "C" __attribute__((weak)) bool BlinkIOSMetalDeviceAvailable();
 
 namespace content {
@@ -108,11 +107,8 @@ void InProcessGpuThread::Init() {
   }
 
 #if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
-  // ANGLE asks for a Metal device exactly once, inside the eglGetPlatformDisplay
-  // below, and caches the answer process-wide. A nil device there costs us the
-  // EGL display, then GL init leaves kGLImplementationNone and no web content
-  // can ever be rasterized. This runs well before the scene is connected, so
-  // give the device a bounded chance to become reachable before ANGLE looks.
+  // ANGLE питає Metal device лише раз і кешує, nil це без EGL і растеризації
+  // тому даємо девайсу трохи часу з'явитись
   if (BlinkIOSMetalDeviceAvailable) {
     constexpr base::TimeDelta kMetalPollInterval = base::Milliseconds(40);
     constexpr base::TimeDelta kMetalWaitBudget = base::Milliseconds(2000);
@@ -132,7 +128,7 @@ void InProcessGpuThread::Init() {
 #endif
 
   BlinkBootLog("GPU0c: calling GpuInit::InitializeInProcess (GL/ANGLE init)");
-  auto gpu_init = std::make_unique<gpu::GpuInit>();
+  auto gpu_init = gpu::GpuInit::Create();
   gpu_init->InitializeInProcess(base::CommandLine::ForCurrentProcess(),
                                 gpu_preferences_);
   BlinkBootLog("GPU0d: InitializeInProcess returned (GL/ANGLE init done)");

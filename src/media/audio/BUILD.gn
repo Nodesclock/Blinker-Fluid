@@ -48,6 +48,7 @@ source_set("audio") {
     "alive_checker.h",
     "application_loopback_device_helper.cc",
     "application_loopback_device_helper.h",
+    "audio_constants.h",
     "audio_debug_file_writer.cc",
     "audio_debug_file_writer.h",
     "audio_debug_recording_helper.cc",
@@ -109,6 +110,8 @@ source_set("audio") {
     "audio_thread_hang_monitor.h",
     "audio_thread_impl.cc",
     "audio_thread_impl.h",
+    "audio_trace_utils.cc",
+    "audio_trace_utils.h",
     "clockless_audio_sink.cc",
     "clockless_audio_sink.h",
     "fake_audio_input_stream.cc",
@@ -195,8 +198,8 @@ source_set("audio") {
     frameworks += [
       "AudioUnit.framework",
       "CoreMedia.framework",
+      "ScreenCaptureKit.framework",
     ]
-    weak_frameworks = [ "ScreenCaptureKit.framework" ]  # macOS 13.0
   }
 
   if (is_ios) {
@@ -210,13 +213,8 @@ source_set("audio") {
 
     frameworks += [ "AVFoundation.framework" ]
 
-    # audio_session_manager_ios.mm uses AVAudioSession/AVAudioApplication, which
-    # the iOS 15+ SDK vends from the AVFAudio module. clang autolinks AVFAudio as
-    # a hard dependency, but AVFAudio only exists as a standalone framework on
-    # iOS 14.5+ — so a hard link makes dyld abort at launch on older systems
-    # (e.g. iOS 14.1: "Library not loaded: .../AVFAudio.framework"). Weak-link it
-    # so launch survives when the framework is absent; the AVAudioSession class is
-    # still vended by AVFoundation on those releases, so audio keeps working.
+    # AVAudioSession в модулі AVFAudio, а окремим фреймворком він є з iOS 14.5.
+    # Слабкий лінк щоб dyld не падав на iOS 14.1, клас дає і AVFoundation.
     weak_frameworks = [ "AVFAudio.framework" ]
   }
 
@@ -368,9 +366,12 @@ source_set("audio") {
       "fuchsia/audio_output_stream_fuchsia.cc",
       "fuchsia/audio_output_stream_fuchsia.h",
     ]
+    public_deps = [
+      "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+      "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
+    ]
     deps += [
       "//media/fuchsia/common",
-      "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
       "//third_party/fuchsia-sdk/sdk/pkg/sys_cpp",
     ]
   }
@@ -450,6 +451,7 @@ source_set("unit_tests") {
     "audio_debug_recording_manager_unittest.cc",
     "audio_device_description_unittest.cc",
     "audio_device_stats_reporter_unittest.cc",
+    "audio_device_thread_unittest.cc",
     "audio_encoders_unittest.cc",
     "audio_input_device_unittest.cc",
     "audio_input_stream_data_interceptor_unittest.cc",
@@ -460,10 +462,13 @@ source_set("unit_tests") {
     "audio_output_unittest.cc",
     "audio_system_impl_unittest.cc",
     "audio_thread_hang_monitor_unittest.cc",
+    "audio_trace_utils_unittest.cc",
+    "flac_audio_handler_unittest.cc",
     "null_audio_sink_unittest.cc",
     "power_observer_helper_unittest.cc",
     "reconfigurable_audio_bus_pool_unittest.cc",
     "simple_sources_unittest.cc",
+    "test_data.h",
     "wav_audio_handler_unittest.cc",
   ]
 
@@ -484,11 +489,16 @@ source_set("unit_tests") {
 
   if (is_android) {
     sources += [
+      "android/aaudio_output_unittest.cc",
+      "android/aaudio_stream_wrapper_unittest.cc",
       "android/audio_android_unittest.cc",
       "android/audio_device_id_unittest.cc",
       "android/audio_device_type_unittest.cc",
       "android/audio_device_unittest.cc",
     ]
+    if (media_use_opensles) {
+      sources += [ "android/opensles_output_unittest.cc" ]
+    }
     deps += [
       "//media/gpu",
       "//ui/gl",
@@ -511,14 +521,9 @@ source_set("unit_tests") {
       "mac/catap_audio_input_stream_unittest.mm",
     ]
     deps += [ "//third_party/ocmock" ]
-    frameworks = [ "CoreMedia.framework" ]
-    weak_frameworks = [ "ScreenCaptureKit.framework" ]  # macOS 13.0
-  }
-
-  if (is_chromeos || is_castos || is_cast_android) {
-    sources += [
-      "flac_audio_handler_unittest.cc",
-      "test_data.h",
+    frameworks = [
+      "CoreMedia.framework",
+      "ScreenCaptureKit.framework",
     ]
   }
 
@@ -557,7 +562,10 @@ source_set("unit_tests") {
 
   if (is_fuchsia) {
     sources += [ "fuchsia/audio_input_stream_fuchsia_test.cc" ]
-    deps += [ "//media/fuchsia/audio:test_support" ]
+    deps += [
+      "//media/fuchsia/audio:test_support",
+      "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
+    ]
   }
 
   if (use_alsa) {
@@ -575,14 +583,6 @@ source_set("unit_tests") {
 
 fuzzer_test("wav_audio_handler_fuzzer") {
   sources = [ "wav_audio_handler_fuzzer.cc" ]
-  deps = [
-    "//base",
-    "//media:test_support",
-  ]
-}
-
-fuzzer_test("flac_audio_handler_fuzzer") {
-  sources = [ "flac_audio_handler_fuzzer.cc" ]
   deps = [
     "//base",
     "//media:test_support",

@@ -7,6 +7,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreVideo/CoreVideo.h>
 #include <simd/simd.h>
+
 #include <vector>
 
 #include "base/apple/foundation_util.h"
@@ -19,11 +20,9 @@
 namespace media {
 
 namespace {
-// iOS-14 back-deploy: CVBufferCopyAttachment() is iOS 15+/macOS 12+. At a 14.0
-// deployment target it is weak-imported -> NULL on iOS 14, so calling it while
-// detecting a video frame's color space crashes. Fall back to the older
-// CVBufferGetAttachment() (since iOS 4), which returns a NON-owned reference, so
-// RETAIN it to match the +1 ownership CVBufferCopyAttachment would have given.
+
+// CVBufferCopyAttachment() лише з iOS 15. CVBufferGetAttachment()
+// вертає не свою ссилку, тому RETAIN
 base::apple::ScopedCFTypeRef<CFTypeRef> CopyCVBufferAttachment(
     CVImageBufferRef image_buffer,
     CFStringRef key) {
@@ -38,6 +37,21 @@ base::apple::ScopedCFTypeRef<CFTypeRef> CopyCVBufferAttachment(
       base::scoped_policy::RETAIN);
 #pragma clang diagnostic pop
 }
+
+base::apple::ScopedCFTypeRef<CFDictionaryRef>
+GetImageBufferPixelFormatDescription(CVImageBufferRef image_buffer) {
+  // CoreVideo does not expose the YUV range as a separate image-buffer
+  // attachment. For CVPixelBuffers, the range is described by the pixel
+  // format.
+  if (!image_buffer || CFGetTypeID(image_buffer) != CVPixelBufferGetTypeID()) {
+    return base::apple::ScopedCFTypeRef<CFDictionaryRef>();
+  }
+
+  return base::apple::ScopedCFTypeRef<CFDictionaryRef>(
+      CVPixelFormatDescriptionCreateWithPixelFormatType(
+          nullptr, CVPixelBufferGetPixelFormatType(image_buffer)));
+}
+
 }  // namespace
 
 gfx::ColorSpace GetImageBufferColorSpace(CVImageBufferRef image_buffer) {
@@ -49,10 +63,16 @@ gfx::ColorSpace GetImageBufferColorSpace(CVImageBufferRef image_buffer) {
       CopyCVBufferAttachment(image_buffer, kCVImageBufferGammaLevelKey));
   base::apple::ScopedCFTypeRef<CFTypeRef> ycbcr_matrix(
       CopyCVBufferAttachment(image_buffer, kCVImageBufferYCbCrMatrixKey));
-
+  const auto pixel_format_description =
+      GetImageBufferPixelFormatDescription(image_buffer);
+  const CFTypeRef component_range =
+      pixel_format_description
+          ? CFDictionaryGetValue(pixel_format_description.get(),
+                                 kCVPixelFormatComponentRange)
+          : nullptr;
   return gfx::ColorSpaceFromCVImageBufferKeys(
       color_primaries.get(), transfer_function.get(), gamma_level.get(),
-      ycbcr_matrix.get());
+      ycbcr_matrix.get(), component_range);
 }
 
 gfx::ColorSpace GetFormatDescriptionColorSpace(
@@ -65,7 +85,9 @@ gfx::ColorSpace GetFormatDescriptionColorSpace(
       CMFormatDescriptionGetExtension(format_description,
                                       kCMFormatDescriptionExtension_GammaLevel),
       CMFormatDescriptionGetExtension(
-          format_description, kCMFormatDescriptionExtension_YCbCrMatrix));
+          format_description, kCMFormatDescriptionExtension_YCbCrMatrix),
+      CMFormatDescriptionGetExtension(
+          format_description, kCMFormatDescriptionExtension_FullRangeVideo));
 }
 
 // Converts a gfx::ColorSpace to individual kCVImageBuffer* keys.
