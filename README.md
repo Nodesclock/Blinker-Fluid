@@ -10,9 +10,9 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v.0.3.1-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-v.0.3.2-blue">
   <img alt="iOS" src="https://img.shields.io/badge/iOS-12%20%26%2014%2B-lightgrey">
-  <img alt="Chromium" src="https://img.shields.io/badge/Chromium-M149-blue">
+  <img alt="Chromium" src="https://img.shields.io/badge/Chromium-M159-blue">
   <img alt="Status" src="https://img.shields.io/badge/status-Experimental-orange">
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue">
 </p>
@@ -155,7 +155,7 @@ Yes! Blinker Fluid is fully open source. Contributions and pull requests are acc
 
 The Chromium source overlay and main build configuration are available directly in this repository.
 
-Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The repository does not contain the entire Chromium source tree; instead, the `src/` directory contains the files modified by Blinker Fluid and is intended to be applied over a normal Chromium checkout.
+Blinker Fluid is based on Chromium **M159** at a pinned Chromium revision. The repository does not contain the entire Chromium source tree; instead, the `src/` directory contains the files modified by Blinker Fluid and is intended to be applied over a normal Chromium checkout. That includes a few files of V8, ANGLE, Dawn and Skia, which live inside the Chromium checkout.
 
 ## Building v.0.3.2
 
