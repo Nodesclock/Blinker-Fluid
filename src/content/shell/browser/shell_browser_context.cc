@@ -26,6 +26,7 @@
 #include "content/public/browser/origin_trials_controller_delegate.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/common/content_switches.h"
+#include "content/shell/browser/blinker_client_hints.h"
 #include "content/shell/browser/shell_content_browser_client.h"
 #include "content/shell/browser/shell_content_index_provider.h"
 #include "content/shell/browser/shell_download_manager_delegate.h"
@@ -141,6 +142,13 @@ ShellBrowserContext::GetPermissionControllerDelegate() {
 
 ClientHintsControllerDelegate*
 ShellBrowserContext::GetClientHintsControllerDelegate() {
+#if BUILDFLAG(IS_IOS)
+  if (!client_hints_controller_delegate_) {
+    owned_client_hints_ =
+        std::make_unique<BlinkerClientHints>(off_the_record_);
+    client_hints_controller_delegate_ = owned_client_hints_.get();
+  }
+#endif
   return client_hints_controller_delegate_;
 }
 
@@ -179,9 +187,8 @@ ShellBrowserContext::GetReduceAcceptLanguageControllerDelegate() {
 
 OriginTrialsControllerDelegate*
 ShellBrowserContext::GetOriginTrialsControllerDelegate() {
-  // Origin-trial grants are durable browsing state.  An off-the-record
-  // context must neither read the regular profile's database nor create its
-  // own on-disk LevelDB under the temporary profile path.
+  // Origin trials це постійний стан. OTR контекст не має ні читати базу
+  // звичайного профілю ні створювати свою LevelDB на диску.
   if (IsOffTheRecord())
     return nullptr;
 

@@ -4,6 +4,8 @@
 
 #include "content/shell/browser/shell_browser_main_parts.h"
 
+
+#include <algorithm>
 #include <cctype>
 #include <iterator>
 #include <map>
@@ -25,8 +27,11 @@
 #include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
 #if BUILDFLAG(IS_IOS)
+#include "content/shell/browser/blinker_session_store.h"
+#endif
+#if BUILDFLAG(IS_IOS)
 #include <CoreFoundation/CoreFoundation.h>
-// Defined in shell_platform_delegate_ios.mm.
+// Визначено в shell_platform_delegate_ios.mm.
 extern "C" __attribute__((weak)) void BlinkInstallOrientationDelegate();
 #endif
 #include "cc/base/switches.h"
@@ -34,7 +39,6 @@ extern "C" __attribute__((weak)) void BlinkInstallOrientationDelegate();
 #include "components/performance_manager/embedder/performance_manager_lifetime.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/devtools_agent_host.h"
-#include "content/public/browser/first_party_sets_handler.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
@@ -53,7 +57,7 @@ extern "C" __attribute__((weak)) void BlinkInstallOrientationDelegate();
 #include "content/shell/common/shell_switches.h"
 #include "device/bluetooth/bluetooth_adapter_factory.h"
 #include "net/base/filename_util.h"
-#include "net/base/net_module.h"
+#include "net/base/module/net_module.h"
 #include "net/grit/net_resources.h"
 #include "ui/base/buildflags.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -93,6 +97,7 @@ namespace {
 
 #if BUILDFLAG(IS_IOS)
 std::map<Shell*, GURL> g_pending_restore_urls;
+int g_restore_active_index = 0;
 #endif
 
 GURL GetStartupURL() {
@@ -109,7 +114,7 @@ GURL GetStartupURL() {
   if (args.empty()) {
 #if BUILDFLAG(IS_IOS)
     CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
-    // A custom homepage set in Settings overrides the start page entirely.
+    // Свою домашню сторінку з Settings ставим замість стартової.
     if (CFPropertyListRef hp = CFPreferencesCopyAppValue(
             CFSTR("BlinkHomepage"), kCFPreferencesCurrentApplication)) {
       std::string homepage;
@@ -125,8 +130,8 @@ GURL GetStartupURL() {
         return GURL(homepage);
       }
     }
-    // Otherwise load a blank page; the native Blinker Fluid start page (a UIKit
-    // view, not web content) is shown on top of it by the UI layer.
+    // Інакше about:blank, а нативна стартова сторінка Blinker Fluid (UIKit
+    // view) лягає зверху.
     return GURL("about:blank");
 #else
     return GURL("https://www.google.com/");
@@ -219,7 +224,7 @@ bool IsHeavyRestoreURL(const GURL& url) {
 }
 
 bool IsSafeRestoreURL(const GURL& url) {
-  if (url.IsAboutBlank()) {
+  if (url.IsAboutBlank() || BlinkerIsSavedPageURL(url)) {
     return true;
   }
   if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) {
@@ -267,8 +272,8 @@ void LogLastHeartbeatForUncleanLaunch() {
   }
   BLINKER_LOGF("CRASH_DIAG: last heartbeat footprint=%s", footprint.c_str());
 
-  // Dump the last 5 heartbeats recorded by the 500ms heavy-page monitor
-  // (StoreRecentHeartbeat in shell.cc) so we can see the run-up to the kill.
+  // Останні 5 heartbeat з монітора важких сторінок (StoreRecentHeartbeat у
+  // shell.cc), щоб було видно що було перед kill.
   if (CFPropertyListRef stored = CFPreferencesCopyAppValue(
           CFSTR("BlinkRecentHeartbeats"), kCFPreferencesCurrentApplication)) {
     if (CFGetTypeID(stored) == CFArrayGetTypeID()) {
@@ -287,9 +292,8 @@ void LogLastHeartbeatForUncleanLaunch() {
   }
 }
 
-// iOS port: returns the URLs of the tabs that were open last session (written
-// by BlinkSaveOpenTabs in shell_platform_delegate_ios.mm), but only if the last
-// process exited cleanly and the saved URL is safe to load automatically.
+// URL вкладок з минулої сесії (пише BlinkSaveOpenTabs), але лиш якщо процес
+// вийшов чисто і URL безпечно відкривати самому.
 std::vector<GURL> GetRestoreTabURLs() {
   std::vector<GURL> result;
   CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
@@ -331,7 +335,7 @@ std::vector<GURL> GetRestoreTabURLs() {
           CFSTR("BlinkOpenTabs"), kCFPreferencesCurrentApplication)) {
     if (CFGetTypeID(saved) == CFArrayGetTypeID()) {
       CFArrayRef arr = static_cast<CFArrayRef>(saved);
-      const CFIndex kMaxRestore = 12;  // bound memory on a constrained device
+      const CFIndex kMaxRestore = 12;
       CFIndex n = CFArrayGetCount(arr);
       for (CFIndex i = 0;
            i < n && static_cast<CFIndex>(result.size()) < kMaxRestore; ++i) {
@@ -341,6 +345,9 @@ std::vector<GURL> GetRestoreTabURLs() {
           continue;
         }
         GURL u(CFStringToUTF8(s));
+        if (u.SchemeIsFile()) {
+          u = BlinkerRebaseSavedPageURL(u);
+        }
         if (!IsSafeRestoreURL(u)) {
           continue;
         }
@@ -395,6 +402,12 @@ GURL TakePendingRestoreURL(Shell* shell) {
 
 void ForgetPendingRestoreURL(Shell* shell) {
   g_pending_restore_urls.erase(shell);
+}
+
+int TakeRestoreActiveTabIndex() {
+  const int index = g_restore_active_index;
+  g_restore_active_index = 0;
+  return index;
 }
 #endif
 
@@ -451,19 +464,43 @@ void ShellBrowserMainParts::InitializeMessageLoopContext() {
   BLINKER_DIAG(private_browsing
                    ? "PRIVATE_MODE: using in-memory browser context"
                    : "PRIVATE_MODE: using persistent browser context");
-  // Restore the first tab eagerly and defer background navigation.
+  // Першу вкладку відновлюєм одразу, решту навігацій відкладаєм.
   std::vector<GURL> restore = GetRestoreTabURLs();
   if (!restore.empty()) {
+    // Вкладка, на якій людина лишилась. Індекс збігається лише коли список
+    // не мінявся, тому звіряємо ще й адресу
+    size_t active = static_cast<size_t>(
+        std::max(0, CopyPreferenceInt(CFSTR("BlinkActiveTabIndex"))));
+    const std::string active_url =
+        CopyPreferenceString(CFSTR("BlinkActiveTabURL"));
+    if (active >= restore.size() ||
+        (!active_url.empty() && restore[active].spec() != active_url)) {
+      active = 0;
+      for (size_t i = 0; i < restore.size() && !active_url.empty(); ++i) {
+        if (restore[i].spec() == active_url) {
+          active = i;
+          break;
+        }
+      }
+    }
+    g_restore_active_index = static_cast<int>(active);
     for (size_t i = 0; i < restore.size(); ++i) {
-      const bool load_now = i == 0;
+      const bool load_now = i == 0 || i == active;
+      // Вкладка без навігації, щоб у неї можна було відновити весь стек
+      // історії. Порожня вкладка відкриває about:blank, як і було.
+      const bool blank = restore[i].IsAboutBlank();
       Shell* shell = Shell::CreateNewWindow(
-          launch_context, load_now ? restore[i] : GURL(url::kAboutBlankURL),
-          nullptr, gfx::Size());
+          launch_context, blank ? GURL(url::kAboutBlankURL) : GURL(), nullptr,
+          gfx::Size());
+      if (load_now && shell && !blank &&
+          !BlinkerRestoreTabSession(shell->web_contents(), restore[i])) {
+        shell->LoadURL(restore[i]);
+      }
       if (!load_now && shell && !restore[i].IsAboutBlank()) {
         g_pending_restore_urls.emplace(shell, restore[i]);
         BLINKER_DIAG("SESSION_RESTORE: background tab deferred");
       }
-      if (!load_now && shell && shell->web_contents()) {
+      if (i != 0 && shell && shell->web_contents()) {
         shell->web_contents()->WasHidden();
       }
     }
@@ -499,10 +536,11 @@ int ShellBrowserMainParts::PreCreateThreads() {
   return 0;
 }
 
-void ShellBrowserMainParts::PostCreateThreads() {
+int ShellBrowserMainParts::PostCreateThreads() {
   performance_manager_lifetime_ =
       std::make_unique<performance_manager::PerformanceManagerLifetime>(
           performance_manager::GraphFeatures::WithMinimal(), base::DoNothing());
+  return RESULT_CODE_NORMAL_EXIT;
 }
 
 int ShellBrowserMainParts::PreMainMessageLoopRun() {
@@ -511,14 +549,13 @@ int ShellBrowserMainParts::PreMainMessageLoopRun() {
 #endif
 
 #if BUILDFLAG(IS_IOS)
-  // Must be in place before any page can call screen.orientation.lock().
+  // Має стояти до того, як сторінка викличе screen.orientation.lock().
   if (BlinkInstallOrientationDelegate) {
     BlinkInstallOrientationDelegate();
   }
 
-  // Initialize after the browser process and boot logger are established.
-  // The browser-client constructor is early enough that its log line was not
-  // observable on device, which made a dead throttle look like a dead matcher.
+  // Після запуску браузерного процесу і логера, бо рядок з конструктора клієнта
+  // браузера в лог ще не потрапляє.
   BlinkerContentFilter& filter = BlinkerContentFilter::GetInstance();
   filter.EnsureLoaded();
   const bool was_enabled = filter.enabled();
@@ -536,7 +573,11 @@ int ShellBrowserMainParts::PreMainMessageLoopRun() {
   InitializeBrowserContexts();
   Shell::Initialize(CreateShellPlatformDelegate());
   net::NetModule::SetResourceProvider(PlatformResourceProvider);
+#if !BUILDFLAG(IS_IOS)
+  // На iOS віддалене налагодження не вмикається ні перемикачем, ні
+  // налаштуванням, бо DevTools відкриває всі вкладки і cookies локальним апкам.
   ShellDevToolsManagerDelegate::StartHttpHandler(browser_context_.get());
+#endif
   InitializeMessageLoopContext();
   return 0;
 }

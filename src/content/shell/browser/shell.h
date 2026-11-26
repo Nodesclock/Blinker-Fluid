@@ -10,13 +10,16 @@
 #include <string>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "build/build_config.h"
-#include "content/public/browser/session_storage_namespace.h"
+#include "content/public/browser/session_storage_namespace_handle.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/shell/browser/shell_platform_delegate.h"
+#include "ui/base/mojom/window_open_disposition.mojom-forward.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/native_ui_types.h"
 
@@ -77,11 +80,15 @@ class Shell : public WebContentsDelegate, public WebContentsObserver {
       const scoped_refptr<SiteInstance>& site_instance,
       const gfx::Size& initial_size);
 
+  // Нова вкладка з копією історії `source`, як дублювання вкладки в Chrome.
+  // nullptr, якщо пам'яті на ще одну вкладку немає.
+  static Shell* CreateDuplicate(Shell* source);
+
   // Returns the Shell object corresponding to the given WebContents.
   static Shell* FromWebContents(WebContents* web_contents);
 
   // Returns the currently open windows.
-  static std::vector<Shell*>& windows() { return windows_; }
+  static base::span<const raw_ptr<Shell>> windows();
 
   // Stores the supplied |quit_closure|, to be run when the last Shell instance
   // is destroyed.
@@ -119,7 +126,7 @@ class Shell : public WebContentsDelegate, public WebContentsObserver {
       WebContents* source,
       std::unique_ptr<WebContents> new_contents,
       const GURL& target_url,
-      WindowOpenDisposition disposition,
+      ui::mojom::WindowOpenDisposition disposition,
       const blink::mojom::WindowFeatures& window_features,
       bool user_gesture,
       bool* was_blocked) override;
@@ -236,14 +243,17 @@ class Shell : public WebContentsDelegate, public WebContentsObserver {
   void TitleWasSet(NavigationEntry* entry) override;
   void RenderFrameCreated(RenderFrameHost* frame_host) override;
 #if BUILDFLAG(IS_IOS)
-  // Authentication redirect diagnostics.
+  // Діагностика редиректів під час логіну.
   void DidStartNavigation(NavigationHandle* navigation_handle) override;
   void DidRedirectNavigation(NavigationHandle* navigation_handle) override;
   void DidFinishNavigation(NavigationHandle* navigation_handle) override;
   void ResourceLoadComplete(
       RenderFrameHost* render_frame_host,
       const GlobalRequestID& request_id,
+      const GURL& original_url,
       const blink::mojom::ResourceLoadInfo& resource_load_info) override;
+  void DidFinishLoad(RenderFrameHost* render_frame_host,
+                     const GURL& validated_url) override;
 #endif
 #if BUILDFLAG(IS_MAC)
   void PrimaryPageChanged(Page& page) override;
@@ -264,12 +274,6 @@ class Shell : public WebContentsDelegate, public WebContentsObserver {
   bool hold_file_chooser_ = false;
   scoped_refptr<FileSelectListener> held_file_chooser_listener_;
   size_t run_file_chooser_count_ = 0u;
-
-  // A container of all the open windows. We use a vector so we can keep track
-  // of ordering.
-  static std::vector<Shell*> windows_;
-
-  static base::OnceCallback<void(Shell*)> shell_created_callback_;
 };
 
 }  // namespace content

@@ -12,20 +12,26 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/memory/memory_pressure_listener.h"
-#include "base/no_destructor.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/strings/escape.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/memory/weak_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "build/build_config.h"
@@ -52,7 +58,10 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
 #include "content/shell/app/resource.h"
+#include "content/shell/browser/blinker_content_filter.h"
+#include "content/shell/browser/blinker_extension_api.h"
 #include "content/shell/browser/blinker_extensions.h"
+#include "content/shell/browser/blinker_web_extension.h"
 #include "content/shell/browser/shell_content_browser_client.h"
 #include "content/shell/browser/shell_devtools_frontend.h"
 #include "content/shell/browser/shell_javascript_dialog_manager.h"
@@ -73,6 +82,7 @@
 #include "third_party/blink/public/mojom/input/pointer_lock_result.mojom.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 #include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
+#include "ui/base/mojom/window_open_disposition.mojom-shared.h"
 #include "url/origin.h"
 
 #if BUILDFLAG(IS_IOS)
@@ -86,17 +96,14 @@ extern "C" int BlinkActiveRWHVCount();
 extern "C" int BlinkActiveBrowserCompositorCount();
 extern "C" int BlinkActiveAttachedCALayerCount();
 extern "C" void BlinkDiscardBackgroundTabs(content::Shell* keep);
+void BlinkApplyPrivacyRendererPrefs(blink::RendererPreferences* prefs);
 extern "C" void BlinkDiscardBackgroundTabsUnderPressure();
+extern "C" void BlinkTabAudioStateChanged(content::Shell* shell);
 #endif
 
 namespace content {
 
 namespace {
-// Null until/unless the default main message loop is running.
-base::OnceClosure& GetMainMessageLoopQuitClosure() {
-  static base::NoDestructor<base::OnceClosure> closure;
-  return *closure;
-}
 
 constexpr int kDefaultTestWindowWidthDip = 800;
 constexpr int kDefaultTestWindowHeightDip = 600;
@@ -107,11 +114,8 @@ constexpr int kDefaultTestWindowHeightDip = 600;
 ShellPlatformDelegate* g_platform;
 
 #if BUILDFLAG(IS_IOS)
-// Memory limits for the single-process iOS runtime. These are now derived from
-// the process's real jetsam ceiling on first use rather than being fixed
-// constants — see blinker_memory_policy.h for why. They are accessors, not
-// globals, so the kernel query happens after the app is up rather than during
-// static initialization.
+// Межі пам'яті рахуються з реального ліміту jetsam при першому зверненні
+// (blinker_memory_policy.h), а не під час статичної ініціалізації.
 constexpr bool kEnableIOSGlobalLowMemoryGuard = true;
 bool g_global_low_memory_mode = false;
 int g_main_frame_navigation_start_count = 0;
@@ -133,22 +137,20 @@ std::array<base::TimeTicks, kRecentAuthSlots> g_recent_auth_times;
 size_t g_recent_auth_head = 0;
 bool g_chatgpt_auth_breaker_used = false;
 bool g_chatgpt_mweb_logged = false;
-// 0 = default, 1 = desktop, 2 = mobile Safari.
+// 0 звичайний, 1 desktop, 2 мобільний Safari.
 int g_chatgpt_auth_profile = 2;
-// Used when caret and DOM metrics are unavailable on chat pages.
+// Коли на сторінках з чатом нема метрик каретки і DOM.
 float g_keyboard_chat_fallback_ratio = 0.0f;
 constexpr float kChatInputFallbackBottomRatio = 0.92f;
-// Updated and read synchronously on the UI thread.
+// Пишеться і читається тільки на UI потоці.
 bool g_is_chat_keyboard_relocation_site = false;
 
-// Outstanding OAuth popup and its opener.
+// Відкрите вікно OAuth і його відкривач.
 WebContents* g_auth_popup_contents = nullptr;
 WebContents* g_auth_popup_opener = nullptr;
 
 bool IsHeavySiteURL(const GURL& url);
 
-// Both now live in content/shell/common/blinker_private_logging.h so that every
-// file in the shell can honor the rule, not just this one. See that header.
 using blinker_logging::IsPrivateSession;
 using blinker_logging::LoggableURLSpec;
 
@@ -215,7 +217,6 @@ void StoreHeavyPageHeartbeat(const GURL* url, const BlinkMemoryStats& stats) {
     CFPreferencesSetAppValue(CFSTR("BlinkLastHeartbeatFootprint"),
                              footprint_value, kCFPreferencesCurrentApplication);
     CFRelease(footprint_value);
-    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
   }
 
   BLINKER_DIAGF("HEARTBEAT: timestamp=%ld footprint=%llu url=%s",
@@ -282,7 +283,7 @@ bool IsGoogleAuthPopupRequest(const GURL& requested_url) {
   return false;
 }
 
-// Recognize the about:blank OAuth popup before it reaches accounts.google.com.
+// Впізнає about:blank вікно OAuth ще до переходу на accounts.google.com.
 bool IsClaudeGoogleAuthPopup(WebContents* source, const GURL& target_url) {
   if (!source) {
     return false;
@@ -320,6 +321,18 @@ bool IsSameTopLevelSite(const GURL& a, const GURL& b) {
   return a.host() == b.host();
 }
 
+// Критичне скидання чистить і bfcache, і декодовані картинки, тож без
+// нестачі пам'яті воно лише робить наступну сторінку і Назад холодними.
+void PurgeIfMemoryIsTight(uint64_t footprint) {
+  if (footprint >= blinker_memory::CriticalFootprint()) {
+    base::MemoryPressureListener::NotifyMemoryPressure(
+        base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+  } else if (footprint >= blinker_memory::ModerateFootprint()) {
+    base::MemoryPressureListener::NotifyMemoryPressure(
+        base::MEMORY_PRESSURE_LEVEL_MODERATE);
+  }
+}
+
 void RunSiteSwitchCleanupIfNeeded(const GURL& url,
                                   const GURL& current_url,
                                   bool top_level_starting_navigation) {
@@ -327,11 +340,7 @@ void RunSiteSwitchCleanupIfNeeded(const GURL& url,
       IsSameTopLevelSite(url, current_url)) {
     return;
   }
-  BLINKER_DIAG("SITE_SWITCH_CLEANUP: running before top-level site change");
-  base::MemoryPressureListener::NotifyMemoryPressure(
-      base::MEMORY_PRESSURE_LEVEL_CRITICAL);
-  BLINKER_DIAG("SITE_SWITCH_CLEANUP: memory pressure purge sent");
-  BLINKER_DIAG("SITE_SWITCH_CLEANUP: transient caches cleared");
+  PurgeIfMemoryIsTight(GetBlinkMemoryStats().phys_footprint);
 }
 
 void ShowOOMGuardPage() {
@@ -350,10 +359,8 @@ void ShowOOMGuardPage() {
 
 bool HasPersistentDuplicateViewOrCompositor(int active_rwhv,
                                             int active_compositors) {
-  // Every open tab owns one RenderWidgetHostView and one compositor. Multiple
-  // instances are only a leak when they exceed the number of live Shell tabs;
-  // treating any count above one as a duplicate blocks navigation as soon as
-  // the user opens a second tab.
+  // Кожна відкрита вкладка має свій RenderWidgetHostView і компоситор. Витоком
+  // вважається лише більше view, ніж живих вкладок.
   const int expected = static_cast<int>(Shell::windows().size());
   const bool duplicate =
       active_rwhv > expected || active_compositors > expected;
@@ -429,17 +436,14 @@ bool ApplyDirectAllocationDangerGuard(const GURL& url,
   const bool persistent_duplicate =
       HasPersistentDuplicateViewOrCompositor(active_rwhv, active_compositors);
   RunOOMWatchdogForHeavyLoad(url, stats);
-  BLINKER_LOGF(
+  BLINKER_DIAGF(
       "OOM_GUARD: direct allocation risk footprint=%llu rwhv=%d "
       "compositors=%d attached_layers=%d nav_starts=%d url=%s",
       static_cast<unsigned long long>(stats.phys_footprint), active_rwhv,
       active_compositors, active_layers, g_main_frame_navigation_start_count,
       LoggableURLSpec(url).c_str());
-  if (stats.phys_footprint >= 300ULL * 1024ULL * 1024ULL) {
-    base::MemoryPressureListener::NotifyMemoryPressure(
-        base::MEMORY_PRESSURE_LEVEL_CRITICAL);
-  }
-  if (stats.phys_footprint >= 350ULL * 1024ULL * 1024ULL &&
+  PurgeIfMemoryIsTight(stats.phys_footprint);
+  if (stats.phys_footprint >= blinker_memory::CriticalFootprint() &&
       persistent_duplicate) {
     BLINKER_LOG("OOM_GUARD: active compositor leak suspected");
     BLINKER_LOG("OOM_GUARD: blocked navigation before PartitionAlloc risk");
@@ -450,27 +454,7 @@ bool ApplyDirectAllocationDangerGuard(const GURL& url,
   return false;
 }
 
-// NOTE (kept as a warning, the code it guarded is gone):
-//
-// Do NOT inject page JS from LoadingStateChanged via the public
-// RenderFrameHost::ExecuteJavaScript() API. It CHECK-fails
-// (CanExecuteJavaScript()) on ordinary http/https pages — it is only valid for
-// WebUI / DevTools / about:blank — so an earlier keyboard-avoidance and
-// <meta viewport> injection crashed on every real site (CHECK failed:
-// CanExecuteJavaScript() in render_frame_host_impl.cc: ExecuteJavaScript).
-//
-// The correct pattern is ExecuteJavaScriptInIsolatedWorld from a
-// committed-navigation hook, and it is already implemented and shipping in
-// blinker_extensions.cc (BlinkSetPageZoom, BlinkInjectCosmeticFilters, each in
-// its own isolated world). Use that if page JS is ever needed here again.
-//
-// What used to live here were two wrappers plus a CanSafelyInjectMainFrameJS()
-// helper, all behind hardcoded-false kill switches — permanently unreachable
-// past their first `if`, and logging on every loading-state change to announce
-// that disabled code had not run. Desktop/mobile site mode is handled natively
-// by toggleDesktopSite (UA override + reload).
-
-// Hosts monitored for rapid memory growth.
+// Хости, де слідкуєм за різким ростом пам'яті.
 bool IsMonitoredHeavyHost(const GURL& url) {
   return url.is_valid() &&
          blinker_sites::HasTrait(url.host(), blinker_sites::kMonitorMemory);
@@ -481,7 +465,7 @@ bool IsAISiteURL(const GURL& url) {
          blinker_sites::HasTrait(url.host(), blinker_sites::kAI);
 }
 
-// github.com/<owner>/<repo>[/...] — the heavy repo tree/PR/issues pages.
+// github.com/<owner>/<repo>[/...], важкі сторінки репозиторію.
 bool IsGitHubRepoPage(const GURL& url) {
   if (!IsGitHubURL(url) || url.host() != "github.com") {
     return false;
@@ -520,7 +504,7 @@ int LoadStartsInLast10s() {
   return count;
 }
 
-// Persist a short history for diagnosing exits without a crash report.
+// Коротка історія для розбору виходів без crash report.
 void StoreRecentHeartbeat(const char* entry) {
   CFMutableArrayRef arr = nullptr;
   if (CFPropertyListRef existing = CFPreferencesCopyAppValue(
@@ -542,9 +526,10 @@ void StoreRecentHeartbeat(const char* entry) {
   while (CFArrayGetCount(arr) > 5) {
     CFArrayRemoveValueAtIndex(arr, 0);
   }
+  // Без synchronize. Запис одразу йде в cfprefsd і переживає аварію процесу,
+  // а синхронний скид на диск гальмував кожну зміну завантаження.
   CFPreferencesSetAppValue(CFSTR("BlinkRecentHeartbeats"), arr,
                            kCFPreferencesCurrentApplication);
-  CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
   CFRelease(arr);
 }
 
@@ -606,14 +591,8 @@ void HeavyHeartbeatTick() {
            LoggableURLSpec(url).c_str());
   StoreRecentHeartbeat(entry);
 
-  // Treat rapid footprint growth as a signal to release discardable caches.
-  //
-  // These labels describe only what is measured. Nothing here observes a prompt
-  // being typed, a message being sent, or a response streaming in — the browser
-  // has no visibility into any of that. Earlier wording ("prompt/send activity
-  // suspected", "streaming active", "pre-send purge") asserted user intent the
-  // code cannot see, which made blink_boot.log actively misleading during crash
-  // forensics. Thresholds and behavior below are unchanged.
+  // Різкий ріст footprint означає, що час звільнити кеші. У лог іде лише
+  // виміряне, без здогадок про дії користувача.
   if (IsAISiteURL(url)) {
     if (!g_ai_guard_logged_for_page) {
       BLINKER_DIAG("AI_SITE_GUARD: on AI site, heartbeat monitoring");
@@ -629,11 +608,13 @@ void HeavyHeartbeatTick() {
     const base::TimeTicks now = base::TimeTicks::Now();
     const bool cooled =
         g_last_ai_purge.is_null() || now - g_last_ai_purge > base::Seconds(3);
-    if (cooled &&
-        (growing || stats.phys_footprint >= 320ULL * 1024ULL * 1024ULL)) {
-      BLINKER_DIAG("AI_SITE_GUARD: purge (footprint growth or >=320MB)");
+    if (cooled && (growing || stats.phys_footprint >=
+                                  blinker_memory::ModerateFootprint())) {
+      BLINKER_DIAG("AI_SITE_GUARD: purge");
       base::MemoryPressureListener::NotifyMemoryPressure(
-          base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+          stats.phys_footprint >= blinker_memory::CriticalFootprint()
+              ? base::MEMORY_PRESSURE_LEVEL_CRITICAL
+              : base::MEMORY_PRESSURE_LEVEL_MODERATE);
       g_last_ai_purge = now;
     }
   }
@@ -700,8 +681,7 @@ void RecordAuthUrlAndDetectLoop(const GURL& url) {
   }
 }
 
-// Cookie COUNTS only (never values) for the auth domains, plus partitioned
-// flag.
+// Лише кількість cookies доменів входу і ознака partitioned, без значень.
 void LogAuthCookieCounts(const std::vector<net::CanonicalCookie>& cookies) {
   struct Bucket {
     const char* domain;
@@ -752,20 +732,19 @@ void FlushAndDiagnoseAuthCookies(WebContents* wc) {
   cm->GetAllCookies(base::BindOnce(&LogAuthCookieCounts));
 }
 
-// ChatGPT mobile-web authentication fallback.
+// Запасний шлях входу для мобільного вебу ChatGPT.
 
 constexpr char kChatGPTDesktopUA[] =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+    "(KHTML, like Gecko) Chrome/" CONTENT_SHELL_MAJOR_VERSION
+    ".0.0.0 Safari/537.36";
 constexpr char kChatGPTIPhoneSafariUA[] =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 "
     "Safari/604.1";
 
-// Google rejects the otherwise coherent Android/Chromium identity on the
-// legacy iOS 11/12 build after credential submission. Use a supported mobile
-// Safari identity only for Google Account pages on those OS releases. Modern
-// Blinker builds keep the Chromium identity used for CAPTCHA compatibility.
+// На iOS 11 і 12 Google відхиляє ідентичність Android/Chromium після введення
+// пароля, тому сторінки Google Account там отримують UA мобільного Safari.
 constexpr char kGoogleLegacySafariUA[] =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 "
@@ -821,12 +800,11 @@ void StopFrontShellLoad() {
   }
 }
 
-// Conservative fallback for bottom-aligned chat inputs when renderer metrics
-// are unavailable.
+// Обережний запасний варіант для полів чату внизу, коли метрик рендерера нема.
 void UpdateKeyboardChatFallback(const GURL& url) {
   const std::string host(url.host());
-  // Don't let a transient empty / about:blank URL (which fires mid-navigation)
-  // clobber a real chat host while the keyboard is up. Keep the previous state.
+  // Порожній чи about:blank URL посеред навігації не має збивати хост чату,
+  // поки клавіатура відкрита.
   if (host.empty()) {
     BLINKER_DIAG(
         "KEYBOARD_RELOCATE: chat fallback disabled reason=empty host (kept "
@@ -851,9 +829,8 @@ void UpdateKeyboardChatFallback(const GURL& url) {
   }
 }
 
-// Runs off the navigation callback (posted): apply the chatgpt-auth UA profile,
-// stop the looping navigation, and retry ONCE without mweb_fallback so ChatGPT
-// takes the standard provider redirect instead of the broken mobile-web path.
+// Поза колбеком навігації. Ставить UA для входу в ChatGPT, зупиняє цикл і раз
+// повторює без mweb_fallback, щоб ChatGPT пішов звичайним редиректом.
 void BreakChatGPTMwebLoop(GURL stripped_url) {
   Shell* shell = Shell::windows().empty() ? nullptr : Shell::windows().front();
   if (!shell || !shell->web_contents()) {
@@ -886,8 +863,8 @@ void BreakChatGPTMwebLoop(GURL stripped_url) {
   }
 }
 
-// Purge before loading a heavy GitHub repo page. Never blocks the click — the
-// extreme-memory block is handled by ApplyGlobalMemoryGuard.
+// Звільняє пам'ять перед важкою сторінкою репозиторію GitHub. Клік не
+// блокується, крайні випадки обробляє ApplyGlobalMemoryGuard.
 void ApplyGitHubRepoGuard(const GURL& url) {
   if (!IsGitHubRepoPage(url)) {
     return;
@@ -932,9 +909,8 @@ bool ApplyGlobalMemoryGuard(const GURL& url,
         "GLOBAL_MEM_GUARD: footprint over critical threshold -> purge");
     base::MemoryPressureListener::NotifyMemoryPressure(
         base::MEMORY_PRESSURE_LEVEL_CRITICAL);
-    // A purge only drops caches. Resident background renderers are the larger
-    // share of the footprint at this point, so shed those too rather than let
-    // jetsam take the whole app.
+    // Purge лиш скидає кеші, а більшу частину footprint тримають фонові
+    // рендерери. Тому їх теж скидаєм, а не чекаєм поки jetsam вб'є все.
     BlinkDiscardBackgroundTabsUnderPressure();
   }
   if (stats.phys_footprint >= blinker_memory::ModerateFootprint()) {
@@ -1006,10 +982,28 @@ bool ShouldBlockNewWebContents(const char* path, const GURL& url) {
 }
 
 #endif
-}  // namespace
 
-std::vector<Shell*> Shell::windows_;
-base::OnceCallback<void(Shell*)> Shell::shell_created_callback_;
+// Owning pointers, held as raw pointers so they need no exit-time destructor.
+// Null until/unless the default main message loop is running.
+base::OnceClosure* g_main_message_loop_quit_closure = nullptr;
+// Set by SetShellCreatedCallback(), consumed by the next Shell or Shutdown().
+base::OnceCallback<void(Shell*)>* g_shell_created_callback = nullptr;
+// Created with the first Shell and deleted when the last one closes. Ordered
+// so windows() reflects creation order.
+std::vector<raw_ptr<Shell>>* g_windows = nullptr;
+
+// Runs and deletes the quit closure, if any.
+void RunMainMessageLoopQuitClosure() {
+  if (!g_main_message_loop_quit_closure) {
+    return;
+  }
+  base::OnceClosure quit_closure = std::move(*g_main_message_loop_quit_closure);
+  delete g_main_message_loop_quit_closure;
+  g_main_message_loop_quit_closure = nullptr;
+  std::move(quit_closure).Run();
+}
+
+}  // namespace
 
 Shell::Shell(std::unique_ptr<WebContents> web_contents,
              bool should_set_delegate)
@@ -1025,27 +1019,37 @@ Shell::Shell(std::unique_ptr<WebContents> web_contents,
   }
   web_contents_->GetMutableRendererPrefs()->accept_languages =
       GetShellLanguage();
+#if BUILDFLAG(IS_IOS)
+  BlinkApplyPrivacyRendererPrefs(web_contents_->GetMutableRendererPrefs());
+#endif
 
-  windows_.push_back(this);
+  if (!g_windows) {
+    g_windows = new std::vector<raw_ptr<Shell>>();
+  }
+  g_windows->push_back(this);
 
-  if (shell_created_callback_) {
-    std::move(shell_created_callback_).Run(this);
+  if (g_shell_created_callback) {
+    base::OnceCallback<void(Shell*)> callback =
+        std::move(*g_shell_created_callback);
+    delete g_shell_created_callback;
+    g_shell_created_callback = nullptr;
+    std::move(callback).Run(this);
   }
 }
 
 Shell::~Shell() {
   g_platform->CleanUp(this);
 
-  for (size_t i = 0; i < windows_.size(); ++i) {
-    if (windows_[i] == this) {
-      windows_.erase(windows_.begin() + i);
-      break;
-    }
+  CHECK(g_windows);
+  std::erase(*g_windows, this);
+  if (g_windows->empty()) {
+    delete g_windows;
+    g_windows = nullptr;
   }
 
 #if BUILDFLAG(IS_IOS)
-  // Don't leave the auth-popup trackers dangling if either side dies through
-  // a path other than CloseContents (tab closed from the switcher, teardown).
+  // Трекери вікна входу не мають лишатись висячими, якщо котрась сторона
+  // вмирає не через CloseContents.
   if (web_contents_.get() == g_auth_popup_contents) {
     g_auth_popup_contents = nullptr;
     g_auth_popup_opener = nullptr;
@@ -1083,6 +1087,7 @@ Shell* Shell::CreateShell(std::unique_ptr<WebContents> web_contents,
     raw_web_contents->GetMutableRendererPrefs()->webrtc_ip_handling_policy =
         blink::ToWebRTCIPHandlingPolicy(command_line->GetSwitchValueASCII(
             switches::kForceWebRtcIPHandlingPolicy));
+    raw_web_contents->SyncRendererPrefs();
   }
 
   g_platform->SetContents(shell);
@@ -1095,28 +1100,52 @@ Shell* Shell::CreateShell(std::unique_ptr<WebContents> web_contents,
     g_platform->MainFrameCreated(shell,
                                  raw_web_contents->GetPrimaryMainFrame());
   }
+  BlinkerNoteTabShellCreated(raw_web_contents);
 
   return shell;
 }
 
 // static
+base::span<const raw_ptr<Shell>> Shell::windows() {
+  if (!g_windows) {
+    return {};
+  }
+  return *g_windows;
+}
+
+#if BUILDFLAG(IS_IOS)
+// Upstream віддає список лише для читання, а порядок вкладок міняється.
+extern "C" void BlinkMoveShellWindow(size_t from, size_t to) {
+  if (!g_windows || from >= g_windows->size() || to >= g_windows->size() ||
+      from == to) {
+    return;
+  }
+  raw_ptr<Shell> moved = (*g_windows)[from];
+  g_windows->erase(g_windows->begin() + from);
+  g_windows->insert(g_windows->begin() + to, moved);
+}
+#endif
+
+// static
 void Shell::SetMainMessageLoopQuitClosure(base::OnceClosure quit_closure) {
-  GetMainMessageLoopQuitClosure() = std::move(quit_closure);
+  delete g_main_message_loop_quit_closure;
+  g_main_message_loop_quit_closure =
+      quit_closure ? new base::OnceClosure(std::move(quit_closure)) : nullptr;
 }
 
 // static
 void Shell::QuitMainMessageLoopForTesting() {
-  auto& quit_loop = GetMainMessageLoopQuitClosure();
-  if (quit_loop) {
-    std::move(quit_loop).Run();
-  }
+  RunMainMessageLoopQuitClosure();
 }
 
 // static
 void Shell::SetShellCreatedCallback(
     base::OnceCallback<void(Shell*)> shell_created_callback) {
-  DCHECK(!shell_created_callback_);
-  shell_created_callback_ = std::move(shell_created_callback);
+  DCHECK(!g_shell_created_callback);
+  if (shell_created_callback) {
+    g_shell_created_callback =
+        new base::OnceCallback<void(Shell*)>(std::move(shell_created_callback));
+  }
 }
 
 // static
@@ -1127,7 +1156,7 @@ bool Shell::ShouldHideToolbar() {
 
 // static
 Shell* Shell::FromWebContents(WebContents* web_contents) {
-  for (Shell* window : windows_) {
+  for (Shell* window : windows()) {
     if (window->web_contents() && window->web_contents() == web_contents) {
       return window;
     }
@@ -1144,7 +1173,7 @@ void Shell::Initialize(std::unique_ptr<ShellPlatformDelegate> platform) {
 
 // static
 void Shell::Shutdown() {
-  if (!g_platform) {  // Shutdown has already been called.
+  if (!g_platform) {
     return;
   }
 
@@ -1157,14 +1186,14 @@ void Shell::Shutdown() {
   delete g_platform;
   g_platform = nullptr;
 
+  delete g_shell_created_callback;
+  g_shell_created_callback = nullptr;
+
   for (auto it = RenderProcessHost::AllHostsIterator(); !it.IsAtEnd();
        it.Advance()) {
     it.GetCurrentValue()->DisableRefCounts();
   }
-  auto& quit_loop = GetMainMessageLoopQuitClosure();
-  if (quit_loop) {
-    std::move(quit_loop).Run();
-  }
+  RunMainMessageLoopQuitClosure();
 
   // Pump the message loop to allow window teardown tasks to run. On iOS the
   // run loop is controlled differently and cannot be pumped.
@@ -1186,24 +1215,18 @@ Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
                               const scoped_refptr<SiteInstance>& site_instance,
                               const gfx::Size& initial_size) {
 #if BUILDFLAG(IS_IOS)
-  // A single-process iOS browser cannot keep an arbitrary number of renderer
-  // frames resident. Release inactive frames before allocating the next tab;
-  // their navigation entries, titles and cached thumbnails remain available.
+  // Однопроцесний браузер не тягне скільки завгодно фреймів у пам'яті. Перед
+  // новою вкладкою скидаєм неактивні, історія і мініатюри лишаються.
   if (!Shell::windows().empty()) {
-    BlinkDiscardBackgroundTabs(Shell::windows().front());
+    BlinkDiscardBackgroundTabs(nullptr);
   }
-  // On iOS this is reached ONLY by the explicit "New Tab" button — window.open
-  // / target=_blank / auth popups are handled in AddNewContents and
-  // OpenURLFromTab. So it must ALWAYS create a real, separate tab. Do NOT reuse
-  // an existing window for auth here: that made the New Tab button collapse
-  // into another tab whenever a Google/auth tab was open (TAB_MANAGER bug).
-  // Auth popup reuse stays confined to the window.open paths.
+  // На iOS сюди веде лиш кнопка нової вкладки, window.open і вікна входу
+  // обробляють AddNewContents і OpenURLFromTab.
   BLINKER_DIAG("TAB_MANAGER: new tab created via CreateNewWindow");
   if (ShouldBlockNewWebContents("CreateNewWindow", url)) {
     BLINKER_DIAG("TAB_MANAGER: new tab blocked (extreme memory)");
-    // This is an explicit New Tab request. Returning an existing Shell makes
-    // the caller treat tab 0 as newly created and switches the visible window
-    // away from the start page that received the tap.
+    // Це явний запит New Tab. Якщо вернути наявний Shell, викликач вважатиме
+    // вкладку 0 новою і перемкне екран зі стартової сторінки.
     return nullptr;
   }
 #endif
@@ -1221,6 +1244,26 @@ Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
   if (!url.is_empty()) {
     shell->LoadURL(url);
   }
+  return shell;
+}
+
+// static
+Shell* Shell::CreateDuplicate(Shell* source) {
+  if (!source || !source->web_contents()) {
+    return nullptr;
+  }
+#if BUILDFLAG(IS_IOS)
+  BlinkDiscardBackgroundTabs(source);
+  if (ShouldBlockNewWebContents("CreateDuplicate",
+                                source->web_contents()->GetVisibleURL())) {
+    return nullptr;
+  }
+#endif
+  Shell* shell = CreateShell(source->web_contents()->Clone(),
+                             AdjustWindowSize(gfx::Size()),
+                             true /* should_set_delegate */);
+  // Clone копіює лише записи навігації, а сторінку треба завантажити.
+  shell->web_contents()->GetController().LoadIfNecessary();
   return shell;
 }
 
@@ -1248,8 +1291,9 @@ void Shell::LoadURLForFrame(const GURL& url,
   BlinkLogMemoryPressurePoint(
       IsRedditURL(url) ? "before reddit.com load" : "before page load", &url);
   if (IsAuthFlowURL(url)) {
-    // Authentication redirects must not be blocked by the memory guard.
-    // Blocking a login_with / oauth callback would break the auth chain.
+    // Редиректи входу guard не блокує, інакше ланцюжок login_with
+    // oauth
+    // зламається.
     BLINKER_DIAG("AUTH_FLOW: guard purge-only");
     const BlinkMemoryStats astats = GetBlinkMemoryStats();
     if (astats.phys_footprint >= blinker_memory::CriticalFootprint()) {
@@ -1274,18 +1318,12 @@ void Shell::LoadURLForFrame(const GURL& url,
                      : IsAISiteURL(url)    ? "ai site navigation"
                                            : "navigation");
 #endif
-  // iOS port: starting a navigation while a previous one is still in flight
-  // (e.g. tapping a second link, or a start-page/bookmark, before the first has
-  // committed) raced the single-process renderer's navigation/RWHV teardown and
-  // crashed the app. Cleanly abort any in-flight load first so the new
-  // navigation starts from a settled state.
+  // Нова навігація поверх незавершеної змагається з розбором RWHV в
+  // однопроцесному рендерері, тому спершу зупиняємо поточне завантаження.
 #if BUILDFLAG(IS_IOS)
   if (web_contents_ && web_contents_->IsLoading()) {
-    // Clicking the SAME link repeatedly (or otherwise re-requesting the URL
-    // that's already in flight) would otherwise cancel+restart that navigation
-    // on every tap — churning the single-process renderer's RWHV/compositor and
-    // crashing (OOM). If we're already navigating to this exact URL, ignore the
-    // duplicate. Only a navigation to a DIFFERENT URL stops the in-flight one.
+    // Повторний клік на те саме посилання не перезапускає навігацію, бо кожен
+    // перезапуск перебудовує RWHV і компоситор. Поточну зупиняє лише інший URL.
     NavigationEntry* pending = web_contents_->GetController().GetPendingEntry();
     if (pending && pending->GetURL() == url) {
       return;
@@ -1293,7 +1331,47 @@ void Shell::LoadURLForFrame(const GURL& url,
     web_contents_->Stop();
   }
 #endif
+#if BUILDFLAG(IS_IOS)
+  // Порожня сторінка вкладки це стартова. Якщо розширення малюють у ній
+  // (Shimeji), документ мусить мати надійне походження, бо без нього в
+  // ньому нема service worker, а значить і мосту до розширення. Адреса
+  // лишається about:blank, так її бачить решта застосунку.
+  if (frame_name.empty() && url.IsAboutBlank() && web_contents_ &&
+      BlinkerWebExtensionRegistry::GetInstance().StartPageHasContentScripts()) {
+    NavigationController::LoadURLParams data_params{GURL(
+        "data:text/html;charset=utf-8," +
+        base::EscapeQueryParamValue(
+            "<!doctype html><meta name=viewport "
+            "content=\"width=device-width,initial-scale=1\">"
+            "<style>html,body{margin:0;height:100%;background:#0e0e10}"
+            "</style>",
+            /*use_plus=*/false))};
+    data_params.load_type = NavigationController::LOAD_TYPE_DATA;
+    data_params.base_url_for_data_url = GURL(kBlinkerStartPageUrl);
+    data_params.virtual_url_for_special_cases = url;
+    data_params.override_user_agent = NavigationController::UA_OVERRIDE_FALSE;
+    // Порожня вкладка лишається однією сторінкою в історії
+    data_params.should_replace_current_entry =
+        web_contents_->GetVisibleURL().IsAboutBlank();
+    web_contents_->GetController().LoadURLWithParams(data_params);
+    return;
+  }
+#endif
   NavigationController::LoadURLParams params(url);
+#if BUILDFLAG(IS_IOS)
+  if (frame_name.empty()) {
+    if (!IsAuthFlowURL(url)) {
+      BlinkApplySiteMode(web_contents(), url);
+    }
+    params.url = BlinkURLForSiteMode(url, BlinkIsDesktopSite(web_contents()));
+    // UA_OVERRIDE_INHERIT тягне mobile флаг старого запису навіть після
+    // SetUserAgentOverride(), тому новий запит вмикає UA явно.
+    params.override_user_agent =
+        web_contents()->GetUserAgentOverride().ua_string_override.empty()
+            ? NavigationController::UA_OVERRIDE_FALSE
+            : NavigationController::UA_OVERRIDE_TRUE;
+  }
+#endif
   params.frame_name = frame_name;
   params.transition_type = transition_type;
   web_contents_->GetController().LoadURLWithParams(params);
@@ -1350,8 +1428,7 @@ void Shell::LoadDataWithBaseURLInternal(const GURL& url,
 }
 
 #if BUILDFLAG(IS_IOS)
-// Implemented in shell_platform_delegate_ios.mm (they need UIKit, which this
-// C++ file can't touch).
+// Реалізовано в shell_platform_delegate_ios.mm, бо треба UIKit.
 extern "C" void BlinkPresentShellWindow(Shell* shell);
 extern "C" void BlinkHideShellWindow(Shell* shell);
 extern "C" void BlinkShellWillCloseReactivate(Shell* closing,
@@ -1362,17 +1439,13 @@ WebContents* Shell::AddNewContents(
     WebContents* source,
     std::unique_ptr<WebContents> new_contents,
     const GURL& target_url,
-    WindowOpenDisposition disposition,
+    ui::mojom::WindowOpenDisposition disposition,
     const blink::mojom::WindowFeatures& window_features,
     bool user_gesture,
     bool* was_blocked) {
 #if BUILDFLAG(IS_IOS)
-  // Google sign-in popups (GSI popup flow, e.g. claude.ai "Continue with
-  // Google"): the popup must ACTUALLY exist — after auth it postMessages the
-  // credential back to the opener and closes itself. The old guard returned
-  // |source| (destroying the just-created popup), which made the button a
-  // silent no-op. Keep it as a real Shell window instead; CloseContents hands
-  // the screen back to the opener when Google is done.
+  // Вікно входу Google має реально існувати, бо після входу воно шле дані
+  // відкривачу через postMessage і закривається, а CloseContents вертає екран.
   const bool is_google_auth_popup =
       IsGoogleAuthPopupRequest(target_url) ||
       target_url.host() == "accounts.google.com" ||
@@ -1402,10 +1475,11 @@ WebContents* Shell::AddNewContents(
 #if !BUILDFLAG(IS_ANDROID)
   // If the shell is opening a document picture-in-picture window, it needs to
   // inform the DocumentPictureInPictureWindowController.
-  if (disposition == WindowOpenDisposition::NEW_PICTURE_IN_PICTURE) {
+  if (disposition == ui::mojom::WindowOpenDisposition::kNewPictureInPicture) {
     DocumentPictureInPictureWindowController* controller =
         PictureInPictureWindowController::
             GetOrCreateDocumentPictureInPictureController(source);
+    controller->Close(/*should_pause_video=*/false);
     controller->SetChildWebContents(new_contents.get());
     controller->Show();
   }
@@ -1416,7 +1490,7 @@ WebContents* Shell::AddNewContents(
       std::move(new_contents), AdjustWindowSize(window_features.bounds.size()),
       !delay_popup_contents_delegate_for_testing_ /* should_set_delegate */);
 #if BUILDFLAG(IS_IOS)
-  if (disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB) {
+  if (disposition == WindowOpenDisposition::kNewBackgroundTab) {
     BlinkHideShellWindow(created_shell);
   } else {
     BlinkPresentShellWindow(created_shell);
@@ -1524,22 +1598,22 @@ WebContents* Shell::OpenURLFromTab(
         navigation_handle_callback) {
   WebContents* target = nullptr;
   switch (params.disposition) {
-    case WindowOpenDisposition::CURRENT_TAB:
+    case ui::mojom::WindowOpenDisposition::kCurrentTab:
       target = source;
       break;
 
-    // Normally, the difference between NEW_POPUP and NEW_WINDOW is that a popup
-    // should have no toolbar, no status bar, no menu bar, no scrollbars and be
-    // not resizable.  For simplicity and to enable new testing scenarios in
-    // content shell and web tests, popups don't get special treatment below
+    // Normally, the difference between `kNewPopup` and `kNewWindow` is that a
+    // popup should have no toolbar, no status bar, no menu bar, no scrollbars
+    // and be not resizable.  For simplicity and to enable new testing scenarios
+    // in content shell and web tests, popups don't get special treatment below
     // (i.e. they will have a toolbar and other things described here).
-    case WindowOpenDisposition::NEW_POPUP:
-    case WindowOpenDisposition::NEW_WINDOW:
+    case ui::mojom::WindowOpenDisposition::kNewPopup:
+    case ui::mojom::WindowOpenDisposition::kNewWindow:
     // content_shell doesn't really support tabs, but some web tests use
     // middle click (which translates into kNavigationPolicyNewBackgroundTab),
-    // so we treat the cases below just like a NEW_WINDOW disposition.
-    case WindowOpenDisposition::NEW_BACKGROUND_TAB:
-    case WindowOpenDisposition::NEW_FOREGROUND_TAB: {
+    // so we treat the cases below just like a `kNewWindow` disposition.
+    case ui::mojom::WindowOpenDisposition::kNewBackgroundTab:
+    case ui::mojom::WindowOpenDisposition::kNewForegroundTab: {
 #if BUILDFLAG(IS_IOS)
       BLINKER_DIAG(
           "WEB_CONTENTS_GUARD: target=_blank using existing WebContents");
@@ -1557,28 +1631,24 @@ WebContents* Shell::OpenURLFromTab(
     }
 
     // No tabs in content_shell:
-    case WindowOpenDisposition::SINGLETON_TAB:
+    case ui::mojom::WindowOpenDisposition::kSingletonTab:
     // No incognito mode in content_shell:
-    case WindowOpenDisposition::OFF_THE_RECORD:
+    case ui::mojom::WindowOpenDisposition::kOffTheRecord:
     // TODO(lukasza): Investigate if some web tests might need support for
-    // SAVE_TO_DISK disposition.  This would probably require that
+    // `kSaveToDisk` disposition.  This would probably require that
     // WebTestControlHost always sets up and cleans up a temporary directory
     // as the default downloads destinations for the duration of a test.
-    case WindowOpenDisposition::SAVE_TO_DISK:
-    // Ignoring requests with disposition == IGNORE_ACTION...
-    case WindowOpenDisposition::IGNORE_ACTION:
+    case ui::mojom::WindowOpenDisposition::kSaveToDisk:
+    // Ignoring requests with disposition == `kIgnoreAction`...
+    case ui::mojom::WindowOpenDisposition::kIgnoreAction:
     default:
       return nullptr;
   }
 
 #if BUILDFLAG(IS_IOS)
-  // iOS port: see LoadURLForFrame. Interrupting an in-flight navigation in the
-  // same tab crashed the single-process renderer. But clicking the SAME link
-  // repeatedly must NOT cancel+restart it each time (that churns the
-  // RWHV/compositor and crashes) — if the tab is already navigating to this
-  // exact URL, ignore the duplicate; only a DIFFERENT URL stops the in-flight
-  // load.
-  if (params.disposition == WindowOpenDisposition::CURRENT_TAB &&
+  // Як у LoadURLForFrame. Той самий URL не перезапускає навігацію, інший
+  // зупиняє поточну.
+  if (params.disposition == WindowOpenDisposition::kCurrentTab &&
       target->IsLoading()) {
     NavigationEntry* pending = target->GetController().GetPendingEntry();
     if (pending && pending->GetURL() == params.url) {
@@ -1621,28 +1691,37 @@ void Shell::LoadingStateChanged(WebContents* source,
     LogCrashBreadcrumb(source, "load committed");
     StartHeavyHeartbeatIfNeeded(url);
   }
-  // REGRESSION GUARD: never call RenderFrameHost::ExecuteJavaScript from here.
-  // It CHECK-fails on http/https pages. Use ExecuteJavaScriptInIsolatedWorld
-  // from a committed-navigation hook instead — see blinker_extensions.cc.
+  // RenderFrameHost::ExecuteJavaScript тут не можна, на http(s) він падає на
+  // CHECK. Скрипти йдуть через ExecuteJavaScriptInIsolatedWorld після коміту.
 #endif
   UpdateNavigationControls(should_show_loading_ui);
   g_platform->SetIsLoading(this, source->IsLoading());
 }
 
 #if BUILDFLAG(IS_IOS)
-// Prevent site-mode changes during authentication redirects.
+// Щоб режим сайту не мінявся під час редиректів входу.
 bool BlinkShellIsInAuthFlow() {
   return g_in_auth_flow;
 }
 
-// Read by the iOS keyboard handler (render_widget_host_view_ios_uiview.mm) as a
-// fallback bottom-ratio when Blink caret metrics are unavailable. >0 only on
-// chat-like sites.
+// Глобальний прапор входу лишався після входу в іншій вкладці, і кнопка
+// Desktop/Mobile мовчки нічого не робила. Кнопці важить лиш ця вкладка.
+bool BlinkShellTabIsInAuthFlow(WebContents* contents) {
+  if (!contents) {
+    return false;
+  }
+  NavigationEntry* pending = contents->GetController().GetPendingEntry();
+  return IsAuthFlowURL(contents->GetLastCommittedURL()) ||
+         (pending && IsAuthFlowURL(pending->GetURL()));
+}
+
+// Читає обробник клавіатури як запасне bottom ratio, коли метрик каретки нема.
+// Більше 0 лиш на сайтах з чатом.
 extern "C" float BlinkKeyboardChatFallbackRatio() {
   return g_keyboard_chat_fallback_ratio;
 }
 
-// Keyboard relocation reads this UI-thread state without owning a WebContents.
+// Клавіатура читає цей стан UI потоку без свого WebContents.
 extern "C" int BlinkIsChatKeyboardRelocationSite() {
   return g_is_chat_keyboard_relocation_site ? 1 : 0;
 }
@@ -1652,6 +1731,18 @@ void Shell::DidStartNavigation(NavigationHandle* navigation_handle) {
     return;
   }
   const GURL url = navigation_handle->GetURL();
+  if (url.SchemeIsHTTPOrHTTPS() && !navigation_handle->IsSameDocument()) {
+    // Покриває і посилання з рендерера, reload та історію. Ставиться до запиту
+    // в мережу, не після коміту і не посеред редиректів входу.
+    if (!IsAuthFlowURL(url) && !g_in_auth_flow) {
+      BlinkApplySiteMode(web_contents(), url);
+    }
+    // Масштаб сайту ставиться ще до першого кадру, а не після коміту, тож
+    // сторінка не стрибає з 100% на свій масштаб
+    BlinkApplyPageZoom(web_contents(), url);
+    navigation_handle->SetIsOverridingUserAgent(
+        !web_contents()->GetUserAgentOverride().ua_string_override.empty());
+  }
   if (!IsAuthFlowURL(url)) {
     return;
   }
@@ -1692,7 +1783,7 @@ void Shell::DidRedirectNavigation(NavigationHandle* navigation_handle) {
   BLINKER_DIAGF("AUTH_FLOW: redirect_count_for_chain=%zu", chain.size());
   RecordAuthUrlAndDetectLoop(url);
 
-  // Recover from the login_with/mweb_fallback redirect cycle.
+  // Вихід з циклу редиректів login_with/mweb_fallback.
   if (IsChatGPTMwebFallback(url)) {
     if (!g_chatgpt_mweb_logged) {
       g_chatgpt_mweb_logged = true;
@@ -1707,8 +1798,8 @@ void Shell::DidRedirectNavigation(NavigationHandle* navigation_handle) {
         base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
             FROM_HERE, base::BindOnce(&BreakChatGPTMwebLoop, stripped));
       } else {
-        // Already retried once and it still loops — stop safely instead of
-        // letting Chromium hit ERR_TOO_MANY_REDIRECTS again.
+        // Повтор уже був, а цикл лишився. Зупиняємось до
+        // ERR_TOO_MANY_REDIRECTS.
         BLINKER_DIAG("AUTH_FLOW: retry exhausted");
         BLINKER_DIAG("AUTH_FLOW: no provider url found");
         base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
@@ -1723,13 +1814,25 @@ void Shell::DidFinishNavigation(NavigationHandle* navigation_handle) {
     return;
   }
   const GURL url = navigation_handle->GetURL();
-  // Committed top-level navigation is the authoritative keyboard-site signal.
+  // Закомічена навігація верхнього рівня вирішує, чи це сайт для клавіатури.
   if (navigation_handle->HasCommitted()) {
+    if (!navigation_handle->IsSameDocument()) {
+      BlinkerContentFilter::GetInstance().ResetHostCount(url.host());
+    }
     UpdateKeyboardChatFallback(url);
+    // Стартовий документ з розширень лишає ту саму адресу about:blank, тож
+    // екран сам не дізнається, що під ним з'явився надійний документ.
+    if (!navigation_handle->IsSameDocument() &&
+        web_contents()->GetVisibleURL().IsAboutBlank()) {
+      g_platform->SetAddressBarURL(this, web_contents()->GetVisibleURL());
+    }
     if (!navigation_handle->IsErrorPage()) {
       BlinkApplyPageZoom(web_contents(), url);
-      BlinkInjectCosmeticFilters(web_contents(), url);
-      BlinkApplySiteMode(web_contents(), url);
+      // Навігація в межах документа лишає і хост, і вже вставлені правила,
+      // а повторна вставка змушувала перераховувати стилі всієї сторінки.
+      if (!navigation_handle->IsSameDocument()) {
+        BlinkInjectCosmeticFilters(web_contents(), url);
+      }
     }
   }
   if (!IsAuthFlowURL(url) && !g_in_auth_flow) {
@@ -1745,10 +1848,8 @@ void Shell::DidFinishNavigation(NavigationHandle* navigation_handle) {
                     LoggableURLSpec(chain[i]).c_str());
     }
   }
-  // Persist authentication cookies after navigation commits.
   FlushAndDiagnoseAuthCookies(web_contents());
-  // Clear the lock once we land back on non-auth (e.g. chatgpt.com app)
-  // content.
+  // Знімаєм блок, коли вернулись на звичайний контент (напр. chatgpt.com).
   if (!IsAuthFlowURL(url)) {
     g_in_auth_flow = false;
     g_chatgpt_auth_breaker_used = false;
@@ -1759,6 +1860,7 @@ void Shell::DidFinishNavigation(NavigationHandle* navigation_handle) {
 void Shell::ResourceLoadComplete(
     RenderFrameHost* render_frame_host,
     const GlobalRequestID& request_id,
+    const GURL& original_url,
     const blink::mojom::ResourceLoadInfo& resource_load_info) {
 #if BUILDFLAG(IS_IOS)
   if (resource_load_info.net_error != net::OK ||
@@ -1775,8 +1877,41 @@ void Shell::ResourceLoadComplete(
                               path.find("/a-/") == std::string::npos)) {
     return;
   }
+  // З цього хоста приходять і чужі аватарки (відгуки, коментарі, пошук). Своя
+  // лише у фреймах акаунта Google, тож інші ігноруєм.
+  const std::string frame_host(
+      render_frame_host ? render_frame_host->GetLastCommittedURL().host() : "");
+  if (frame_host != "accounts.google.com" &&
+      frame_host != "myaccount.google.com" && frame_host != "ogs.google.com") {
+    return;
+  }
   extern void BlinkObserveGoogleAvatarURL(Shell*, const char*);
   BlinkObserveGoogleAvatarURL(this, image_url.spec().c_str());
+#endif
+}
+
+void Shell::DidFinishLoad(RenderFrameHost* render_frame_host,
+                          const GURL& validated_url) {
+#if BUILDFLAG(IS_IOS)
+  const std::string host(validated_url.host());
+  if (host != "accounts.google.com" && host != "myaccount.google.com" &&
+      host != "ogs.google.com" && host != "www.google.com") {
+    return;
+  }
+  extern void BlinkScanGoogleAvatars(WebContents*);
+  // Віджет акаунта доточується пізніше за load, тож скануємо ще двічі.
+  BlinkScanGoogleAvatars(web_contents());
+  for (int seconds : {2, 5}) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE,
+        base::BindOnce(
+            [](base::WeakPtr<WebContents> contents) {
+              extern void BlinkScanGoogleAvatars(WebContents*);
+              BlinkScanGoogleAvatars(contents.get());
+            },
+            web_contents()->GetWeakPtr()),
+        base::Seconds(seconds));
+  }
 #endif
 }
 #endif  // BUILDFLAG(IS_IOS)
@@ -1875,7 +2010,7 @@ void Shell::RegisterProtocolHandler(RenderFrameHost* requesting_frame,
     return;
   }
 
-  if (!user_gesture && !windows_.empty()) {
+  if (!user_gesture && !windows().empty()) {
     // TODO(jfernandez): This is not strictly needed, but we need a way to
     // inform the observers in browser tests that the request has been
     // cancelled, to avoid timeouts. Chrome just holds the handler as pending in
@@ -1941,10 +2076,8 @@ void Shell::Close() {
 
 void Shell::CloseContents(WebContents* source) {
 #if BUILDFLAG(IS_IOS)
-  // Script-initiated close (window.close()), e.g. the Google auth popup once
-  // sign-in completes. If this shell owns the visible window, activate another
-  // one (preferring the popup's opener) BEFORE dying, or the app is left on a
-  // dead UIWindow. The bridge no-ops for background windows.
+  // Закриття зі скрипту, як у вікна входу Google. Якщо ця оболонка на екрані,
+  // спершу активуєм іншу, краще відкривача, інакше лишиться мертвий UIWindow.
   BLINKER_DIAG("AUTH_POPUP_GUARD: script window close");
   BlinkShellWillCloseReactivate(this, g_auth_popup_opener);
   if (source == g_auth_popup_contents) {
@@ -1968,6 +2101,11 @@ void Shell::NavigationStateChanged(WebContents* source,
   if (changed_flags & INVALIDATE_TYPE_URL) {
     g_platform->SetAddressBarURL(this, source->GetVisibleURL());
   }
+#if BUILDFLAG(IS_IOS)
+  if (changed_flags & INVALIDATE_TYPE_AUDIO) {
+    BlinkTabAudioStateChanged(this);
+  }
+#endif
 }
 
 JavaScriptDialogManager* Shell::GetJavaScriptDialogManager(

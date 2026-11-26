@@ -6,21 +6,28 @@
 #define CONTENT_SHELL_BROWSER_SHELL_CONTENT_BROWSER_CLIENT_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
+#include "base/containers/flat_set.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
+#include "base/i18n/language_tag.h"
 #include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "content/public/browser/content_browser_client.h"
+#include "content/public/common/child_process_id.h"
 #include "content/shell/browser/shell_speech_recognition_manager_delegate.h"
 #include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 #include "third_party/blink/public/mojom/navigation/navigation_params.mojom.h"
+#include "url/origin.h"
 
 class PrefService;
 
 #if BUILDFLAG(IS_IOS)
+class ApplicationLocaleStorage;
+
 namespace permissions {
 class BluetoothDelegateImpl;
 }
@@ -34,7 +41,6 @@ class ShellBrowserMainParts;
 std::string GetShellLanguage();
 blink::UserAgentMetadata GetShellUserAgentMetadata();
 blink::UserAgentMetadata GetShellUserAgentMetadataForSiteMode(bool desktop);
-extern int g_force_desktop_site;
 
 class ShellContentBrowserClient : public ContentBrowserClient {
  public:
@@ -61,6 +67,9 @@ class ShellContentBrowserClient : public ContentBrowserClient {
   bool AreIsolatedWebAppsEnabled(BrowserContext* browser_context) override;
   void AppendExtraCommandLineSwitches(base::CommandLine* command_line,
                                       int child_process_id) override;
+#if BUILDFLAG(IS_IOS)
+  base::i18n::LanguageTag GetApplicationLocale() override;
+#endif
   std::string GetAcceptLangs(BrowserContext* context) override;
   void UpdateRendererPreferencesForWorker(
       BrowserContext* browser_context,
@@ -70,24 +79,11 @@ class ShellContentBrowserClient : public ContentBrowserClient {
       WebContents* web_contents) override;
   bool ShouldUrlUseApplicationIsolationLevel(BrowserContext* browser_context,
                                              const GURL& url) override;
-  bool IsSharedStorageAllowed(
-      content::BrowserContext* browser_context,
-      content::RenderFrameHost* rfh,
-      const url::Origin& top_frame_origin,
-      const url::Origin& accessing_origin,
-      std::string* out_debug_message,
-      bool* out_block_is_site_setting_specific) override;
-  bool IsSharedStorageSelectURLAllowed(
-      content::BrowserContext* browser_context,
-      const url::Origin& top_frame_origin,
-      const url::Origin& accessing_origin,
-      std::string* out_debug_message,
-      bool* out_block_is_site_setting_specific) override;
   GeneratedCodeCacheSettings GetGeneratedCodeCacheSettings(
       content::BrowserContext* context) override;
   base::OnceClosure SelectClientCertificate(
       BrowserContext* browser_context,
-      int process_id,
+      ChildProcessId process_id,
       WebContents* web_contents,
       net::SSLCertRequestInfo* cert_request_info,
       net::ClientCertIdentityList client_certs,
@@ -99,6 +95,8 @@ class ShellContentBrowserClient : public ContentBrowserClient {
                               blink::web_pref::WebPreferences* prefs) override;
   std::unique_ptr<content::DevToolsManagerDelegate>
   CreateDevToolsManagerDelegate() override;
+  std::unique_ptr<DigitalIdentityProvider> CreateDigitalIdentityProvider()
+      override;
   void ExposeInterfacesToRenderer(
       service_manager::BinderRegistry* registry,
       blink::AssociatedInterfaceRegistry* associated_registry,
@@ -111,6 +109,9 @@ class ShellContentBrowserClient : public ContentBrowserClient {
   void RegisterBrowserInterfaceBindersForFrame(
       RenderFrameHost* render_frame_host,
       mojo::BinderMapWithContext<RenderFrameHost*>* map) override;
+  void RegisterAssociatedInterfaceBindersForRenderFrameHost(
+      RenderFrameHost& render_frame_host,
+      blink::AssociatedInterfaceRegistry& associated_registry) override;
   void OpenURL(SiteInstance* site_instance,
                const OpenURLParams& params,
                base::OnceCallback<void(WebContents*)> callback) override;
@@ -126,6 +127,7 @@ class ShellContentBrowserClient : public ContentBrowserClient {
       const GURL& url,
       scoped_refptr<net::HttpResponseHeaders> response_headers,
       bool first_auth_attempt,
+      bool do_not_prompt_for_login,
       GuestPageHolder* guest,
       LoginDelegate::LoginAuthRequiredCallback auth_required_callback) override;
   base::DictValue GetNetLogConstants() override;
@@ -167,6 +169,54 @@ class ShellContentBrowserClient : public ContentBrowserClient {
       base::OnceCallback<void(const base::FilePath&)>) override;
   bool HasErrorPage(int http_status_code) override;
   void OnWebContentsCreated(WebContents* web_contents) override;
+  // Віддає ресурси розширень.
+  void RegisterNonNetworkSubresourceURLLoaderFactories(
+      int render_process_id,
+      int render_frame_id,
+      const std::optional<url::Origin>& request_initiator_origin,
+      NonNetworkURLLoaderFactoryMap* factories) override;
+  mojo::PendingRemote<network::mojom::URLLoaderFactory>
+  CreateNonNetworkNavigationURLLoaderFactory(const std::string& scheme,
+                                             FrameTreeNodeId frame_tree_node_id)
+      override;
+  void RegisterNonNetworkServiceWorkerUpdateURLLoaderFactories(
+      BrowserContext* browser_context,
+      NonNetworkURLLoaderFactoryMap* factories) override;
+  // Фрейми розширень без поділу сховища для третіх сторін, щоб вбудований у
+  // сторінку фрейм ділив сховище і service worker з самим розширенням.
+  bool ShouldUseFirstPartyStorageKey(const url::Origin& origin) override;
+  bool CanCreateWindow(RenderFrameHost* opener,
+                       const GURL& opener_url,
+                       const GURL& opener_top_level_frame_url,
+                       const url::Origin& source_origin,
+                       content::mojom::WindowContainerType container_type,
+                       const GURL& target_url,
+                       const Referrer& referrer,
+                       const std::string& frame_name,
+                       WindowOpenDisposition disposition,
+                       const blink::mojom::WindowFeatures& features,
+                       bool user_gesture,
+                       bool opener_suppressed,
+                       bool* no_javascript_access) override;
+  // Дає `redirect` з declarativeNetRequest підставити ресурс розширення,
+  // URLLoaderThrottle між схемами такого не може.
+  void WillCreateURLLoaderFactory(
+      BrowserContext* browser_context,
+      RenderFrameHost* frame,
+      int render_process_id,
+      URLLoaderFactoryType type,
+      const url::Origin& request_initiator,
+      const net::IsolationInfo& isolation_info,
+      std::optional<int64_t> navigation_id,
+      ukm::SourceIdObj ukm_source_id,
+      network::URLLoaderFactoryBuilder& factory_builder,
+      mojo::PendingRemote<network::mojom::TrustedURLLoaderHeaderClient>*
+          header_client,
+      bool* bypass_redirect_checks,
+      bool* disable_secure_dns,
+      network::mojom::URLLoaderFactoryOverridePtr* factory_override,
+      scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
+      bool is_for_network_service) override;
 
   void CreateFeatureListAndFieldTrials();
 
@@ -245,7 +295,10 @@ class ShellContentBrowserClient : public ContentBrowserClient {
       url_loader_factory_params_callback_;
   base::RepeatingCallback<void(NavigationThrottleRegistry&)>
       create_throttles_for_navigation_callback_;
+  // Parsed from switches::kIsolatedContextOrigins on first use.
+  std::optional<base::flat_set<url::Origin>> isolated_context_origins_;
 #if BUILDFLAG(IS_IOS)
+  std::unique_ptr<ApplicationLocaleStorage> application_locale_storage_;
   std::unique_ptr<permissions::BluetoothDelegateImpl> bluetooth_delegate_;
 #endif
 

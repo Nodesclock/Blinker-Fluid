@@ -19,7 +19,6 @@
 #endif
 
 #if BUILDFLAG(IS_IOS)
-// Declared both ways so the header stays includable from plain C++ too.
 #if defined(__OBJC__)
 @class UIView;
 #else

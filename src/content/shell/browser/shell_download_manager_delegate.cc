@@ -39,6 +39,7 @@
 
 #if BUILDFLAG(IS_IOS)
 extern "C" void BlinkMarkDownloadAttention();
+extern "C" void BlinkPresentWalletPass(const char* path);
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -47,6 +48,51 @@ extern "C" void BlinkMarkDownloadAttention();
 #endif
 
 namespace content {
+
+#if BUILDFLAG(IS_IOS)
+namespace {
+
+bool IsWalletPass(const download::DownloadItem& item,
+                  const base::FilePath& path) {
+  return item.GetMimeType() == "application/vnd.apple.pkpass" ||
+         path.MatchesExtension(FILE_PATH_LITERAL(".pkpass"));
+}
+
+// Сам себе видаляє, коли завантаження закінчилося чи зникло.
+class WalletPassObserver : public download::DownloadItem::Observer {
+ public:
+  explicit WalletPassObserver(download::DownloadItem* item) {
+    item->AddObserver(this);
+  }
+
+  void OnDownloadUpdated(download::DownloadItem* item) override {
+    switch (item->GetState()) {
+      case download::DownloadItem::COMPLETE:
+        BlinkPresentWalletPass(item->GetTargetFilePath().value().c_str());
+        Finish(item);
+        return;
+      case download::DownloadItem::CANCELLED:
+      case download::DownloadItem::INTERRUPTED:
+        Finish(item);
+        return;
+      default:
+        return;
+    }
+  }
+
+  void OnDownloadDestroyed(download::DownloadItem* item) override {
+    Finish(item);
+  }
+
+ private:
+  void Finish(download::DownloadItem* item) {
+    item->RemoveObserver(this);
+    delete this;
+  }
+};
+
+}  // namespace
+#endif
 
 ShellDownloadManagerDelegate::ShellDownloadManagerDelegate()
     : download_manager_(nullptr), suppress_prompting_(false) {}
@@ -176,8 +222,8 @@ void ShellDownloadManagerDelegate::ChooseDownloadPath(
 
   base::FilePath result;
 #if BUILDFLAG(IS_IOS)
-  // iOS has no desktop save-file dialog. Keep the generated, sanitized name
-  // and save into the app's Files-visible download directory.
+  // На iOS нема діалогу збереження, тож зберігаєм під готовим іменем в папку
+  // загрузок, яку видно в Files.
   base::CreateDirectory(suggested_path.DirName());
   result = base::GetUniquePath(suggested_path);
   if (result.empty()) {
@@ -220,6 +266,9 @@ void ShellDownloadManagerDelegate::ChooseDownloadPath(
   target_info.target_disposition =
       download::DownloadItem::TARGET_DISPOSITION_OVERWRITE;
   BlinkMarkDownloadAttention();
+  if (IsWalletPass(*item, result)) {
+    new WalletPassObserver(item);
+  }
 #else
   target_info.target_disposition =
       download::DownloadItem::TARGET_DISPOSITION_PROMPT;

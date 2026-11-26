@@ -35,6 +35,8 @@ class ShellPlatformDelegate;
 GURL PeekPendingRestoreURL(Shell* shell);
 GURL TakePendingRestoreURL(Shell* shell);
 void ForgetPendingRestoreURL(Shell* shell);
+// Індекс вкладки, на якій закрили застосунок. Віддається один раз.
+int TakeRestoreActiveTabIndex();
 #endif
 
 #if BUILDFLAG(IS_FUCHSIA)
@@ -53,10 +55,10 @@ class ShellBrowserMainParts : public BrowserMainParts {
   // BrowserMainParts overrides.
   int PreEarlyInitialization() override;
   int PreCreateThreads() override;
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
   void PreCreateMainMessageLoop() override;
 #endif
-  void PostCreateThreads() override;
+  int PostCreateThreads() override;
   void PostCreateMainMessageLoop() override;
   void ToolkitInitialized() override;
   int PreMainMessageLoopRun() override;
